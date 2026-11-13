@@ -7,6 +7,8 @@ export type FactoryEntry = {
   repository: string;
   codebase: string;
   console: string;
+  /** Where the factory's published code is browsed (a Bitbucket repository's web address). */
+  codeWeb?: string;
 };
 
 export function isObject(value: unknown): value is Record<string, unknown> {
@@ -46,10 +48,31 @@ export function readFactoryNames(env: Env, repoRoot: string): string[] {
 }
 
 export function readFactories(env: Env, repoRoot: string): FactoryEntry[] {
-  return readEntries(env, repoRoot).map((entry, index) => ({
-    name: stringField(entry, 'name', index),
-    repository: stringField(entry, 'repository', index),
-    codebase: stringField(entry, 'codebase', index),
-    console: stringField(entry, 'console', index),
-  }));
+  return readEntries(env, repoRoot).map((entry, index) => {
+    const codeWeb = codeWebField(entry, index);
+    return {
+      name: stringField(entry, 'name', index),
+      repository: stringField(entry, 'repository', index),
+      codebase: stringField(entry, 'codebase', index),
+      console: stringField(entry, 'console', index),
+      ...(codeWeb === undefined ? {} : { codeWeb }),
+    };
+  });
+}
+
+/** The optional `code_web`: an http(s) URL, kept without a trailing `/`. */
+function codeWebField(entry: Record<string, unknown>, index: number): string | undefined {
+  const value = entry.code_web;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !isHttpUrl(value)) {
+    throw new Error(
+      `Invalid factories configuration: factories[${index}].code_web must be an http(s) URL`,
+    );
+  }
+  return value.replace(/\/+$/, '');
+}
+
+export function isHttpUrl(value: string): boolean {
+  const url = URL.parse(value);
+  return url !== null && (url.protocol === 'http:' || url.protocol === 'https:');
 }

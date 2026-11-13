@@ -5,6 +5,7 @@
  */
 import { FACTORY_MAP, type Role } from '../map/factory-map';
 import { type HomeMapRow, lapCard, onQueues, type WorkOrderRow } from '../map/live';
+import { forgeAllHref } from './forge-links';
 import type { HealthWorkableRow } from './health';
 import { pullUrl, SPLIT_WORKFLOW } from './one-lap';
 import type { OwnerQueueRow } from './owner-queue';
@@ -522,10 +523,7 @@ export function boardView(sources: BoardSources, now: Date, order: string | null
     found: found(discoveries),
     notInOrder,
     older: Math.max(0, total - recent),
-    olderHref:
-      factoryRow?.repository == null
-        ? null
-        : `https://github.com/${factoryRow.repository}/issues?q=is%3Aissue+is%3Aclosed`,
+    olderHref: factoryRow?.repository == null ? null : forgeAllHref(),
   };
 }
 

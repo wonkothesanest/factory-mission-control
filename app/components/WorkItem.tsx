@@ -2,6 +2,7 @@ import { type ReactElement, useState } from 'react';
 import { Link } from 'react-router';
 import type { DecideRow, UnstickRow } from '../lib/attention';
 import { type BoardRow, type ItemOnBoard, itemOnBoard } from '../lib/board';
+import { bitbucketHref, forgeHref } from '../lib/forge-links';
 import type { HealthWorkableRow } from '../lib/health';
 import type { OwnerQueueRow } from '../lib/owner-queue';
 import { stateInk } from '../lib/states';
@@ -124,11 +125,14 @@ export function WorkItemBody({
   events,
   board,
   note,
+  bitbucket = null,
 }: {
   header: WorkItemHeader;
   events: readonly TimelineEvent[];
   board: ItemOnBoard | null;
   note: WorkItemNote | null;
+  /** The pull request's published code on Bitbucket, when it has been published. */
+  bitbucket?: string | null;
 }): ReactElement {
   const column = board?.column ?? null;
   return (
@@ -157,12 +161,17 @@ export function WorkItemBody({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {note?.action == null ? null : <PrimaryAction action={note.action} />}
-          <a href={header.issueUrl} className={buttonClass('secondary')}>
+          <a href={forgeHref(header.issueUrl)} className={buttonClass('secondary')}>
             Issue
           </a>
           {board?.prUrl == null ? null : (
-            <a href={board.prUrl} className={buttonClass('secondary')}>
+            <a href={forgeHref(board.prUrl)} className={buttonClass('secondary')}>
               PR #{board.pr}
+            </a>
+          )}
+          {board?.prUrl == null || bitbucket === null ? null : (
+            <a data-link="bitbucket" href={bitbucket} className={buttonClass('secondary')}>
+              Bitbucket
             </a>
           )}
           {header.latestRunHref === null ? null : (
@@ -268,6 +277,7 @@ export function WorkItem({
           header={header}
           events={workItemTimeline(item.rows, factory ?? '')}
           board={onBoard}
+          bitbucket={bitbucketHref(factory ?? '', onBoard?.pr ?? null)}
           note={workItemNote(item.rows, onBoard, stuck.rows ?? [], {
             decide: decide.rows ?? [],
             factory: factory ?? '',

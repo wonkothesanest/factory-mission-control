@@ -2,6 +2,7 @@ import { type ReactElement, type ReactNode, useState } from 'react';
 import { Link, useLocation } from 'react-router';
 import type { AppCheckRow } from '../lib/app-check';
 import { boardHref, orderPanel, orderProgress } from '../lib/board';
+import { forgeHref } from '../lib/forge-links';
 import { clock, relativeTime } from '../lib/format';
 import { lapHref } from '../lib/one-lap';
 import { stateColor } from '../lib/states';
@@ -78,7 +79,7 @@ function Item({ item, note }: { item: MapItem; note: string }): ReactElement {
   return (
     <li data-item={item.key}>
       {item.url ? (
-        <a href={item.url} className={LINK}>
+        <a href={forgeHref(item.url)} className={LINK}>
           {name}
         </a>
       ) : (
@@ -113,7 +114,7 @@ const UNAVAILABLE = {
 function Gate({ outcome }: { outcome: GateOutcome }): ReactElement {
   return (
     <li data-gate-outcome={outcome.number}>
-      <a href={outcome.url} className={`${LINK} font-mono tabular-nums`}>
+      <a href={forgeHref(outcome.url)} className={`${LINK} font-mono tabular-nums`}>
         #{outcome.number}
       </a>
       <span className={CHIP}>{outcome.outcome}</span>
@@ -152,7 +153,7 @@ function ProductDocument({ document }: { document: ProductDocumentRow }): ReactE
   return (
     <li data-product-document={number} className="grid gap-1">
       <span>
-        <a href={url} className={LINK}>
+        <a href={forgeHref(url)} className={LINK}>
           <span className="font-mono tabular-nums">#{number}</span> {title}
         </a>
         <span className={CHIP}>
@@ -233,7 +234,11 @@ export function RightNow({
           )}
         </RunName>
         {lap.issue?.url ? (
-          <a href={lap.issue.url} data-lap-issue className={`${LINK} ml-1.5 font-mono text-[12px]`}>
+          <a
+            href={forgeHref(lap.issue.url)}
+            data-lap-issue
+            className={`${LINK} ml-1.5 font-mono text-[12px]`}
+          >
             GitHub #{lap.issue.number}
           </a>
         ) : null}
@@ -268,7 +273,7 @@ export function RightNow({
     ...[...(live?.health ?? []), ...overdueHealth(live?.steps ?? [], ticking)].map((item) => (
       <li key={item.key} data-health={item.key}>
         {item.url ? (
-          <a href={item.url} className={`${LINK} font-mono`}>
+          <a href={forgeHref(item.url)} className={`${LINK} font-mono`}>
             run {item.run.slice(0, 8)}
           </a>
         ) : (
@@ -331,7 +336,7 @@ export function AppCheckList({ rows }: { rows: readonly AppCheckRow[] }): ReactE
         <li key={row.number} data-app-check={row.number}>
           <span className="font-mono tabular-nums">#{row.number} </span>
           {row.url ? (
-            <a href={row.url} className={LINK}>
+            <a href={forgeHref(row.url)} className={LINK}>
               {row.title}
             </a>
           ) : (

@@ -1,6 +1,7 @@
 import { type ReactElement, type ReactNode, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useActionPending, useActionsEnabled, useStartAction } from './ActionToast';
+import { bitbucketHref, forgeHref } from '../lib/forge-links';
 import { formatCost, formatCount, shortRunId } from '../lib/format';
 import type { LapMapRow } from '../lib/lap-graph';
 import { durationOf, OUTCOME_LABEL, since } from '../lib/laps';
@@ -312,7 +313,7 @@ function Title({ lap, title }: { lap: OneLapRow; title: string }): ReactElement 
       {title.slice(0, at)}
       <a
         data-link="issue"
-        href={lap.issue_url ?? issueUrl(lap.repository, lap.issue_number as number)}
+        href={forgeHref(lap.issue_url ?? issueUrl(lap.repository, lap.issue_number as number))}
         className={LINK}
       >
         {tag}
@@ -342,6 +343,7 @@ function RunHead({
   const title = runTitle(lap, timeline, map);
   const pill = runPill(lap);
   const pr = lap.pr_number;
+  const bitbucket = bitbucketHref(factory, pr);
   const cost = runCost(rows);
   const tokens = runTokens(rows);
   const seconds = lap.status === 'running' ? since(lap.started_at, now) : durationOf(lap);
@@ -391,9 +393,17 @@ function RunHead({
             {pr === null ? null : (
               <>
                 ·
-                <a data-link="pr" href={pullUrl(lap.repository, pr)} className={LINK}>
+                <a data-link="pr" href={forgeHref(pullUrl(lap.repository, pr))} className={LINK}>
                   PR #{pr}
                 </a>
+                {bitbucket === null ? null : (
+                  <>
+                    ·
+                    <a data-link="bitbucket" href={bitbucket} className={LINK}>
+                      Bitbucket
+                    </a>
+                  </>
+                )}
               </>
             )}
             ·
@@ -455,9 +465,9 @@ function RunHead({
 
 /** Where the finished run's primary button goes: the issue, the pull request, or the run that did the work. */
 function doneHref(open: NothingToDo['open'], lap: OneLapRow, factory: string): string {
-  if (open.kind === 'pr' && open.n !== null) return pullUrl(lap.repository, open.n);
+  if (open.kind === 'pr' && open.n !== null) return forgeHref(pullUrl(lap.repository, open.n));
   if (open.kind === 'run' && open.runId !== null) return lapHref(factory, open.runId);
-  return lap.issue_url ?? issueUrl(lap.repository, open.n ?? 0);
+  return forgeHref(lap.issue_url ?? issueUrl(lap.repository, open.n ?? 0));
 }
 
 function ManagerRead({

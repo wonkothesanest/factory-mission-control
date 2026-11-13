@@ -88,4 +88,31 @@ describe('the browser app', () => {
   test('an unknown API path is a 404, not the app', async () => {
     expect((await app().request('/api/nope')).status).toBe(404);
   });
+
+  test('every page carries where its links open: the default forge board without settings', async () => {
+    const html = await (await app().request('/f/widgets/board')).text();
+    expect(html).toContain(
+      '<head><script>window.__MC_LINKS__={"forgeWeb":"http://127.0.0.1:3091","bitbucket":{}}</script>',
+    );
+  });
+
+  test("the links boot names the configured forge board and each published pull request's code", async () => {
+    const res = await createApp({
+      buildId: 'test',
+      distDir,
+      links: {
+        forgeWeb: 'http://127.0.0.1:4000',
+        codeWeb: new Map([['f', 'https://code.example.test/ws/r']]),
+      },
+      forge: {
+        status: () => {
+          throw new Error('not read for a page');
+        },
+        published: () => new Map([['f', new Map([[7, 'factory/pr-7-x']])]]),
+      },
+    }).request('/');
+    expect(await res.text()).toContain(
+      '<script>window.__MC_LINKS__={"forgeWeb":"http://127.0.0.1:4000","bitbucket":{"f":{"7":"https://code.example.test/ws/r/branch/factory/pr-7-x"}}}</script>',
+    );
+  });
 });

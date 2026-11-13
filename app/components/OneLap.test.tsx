@@ -95,8 +95,12 @@ const step = (over: Partial<StepAttemptRow>): StepAttemptRow => ({
 test('the header links the console run, the pull request and the issue, and says why the gate refused', () => {
   const html = render(<LapHeaderBody lap={refused} now={0} />);
   expect(html).toContain(`href="http://localhost:3090/console/r/${RUN}"`);
-  expect(html).toContain('href="https://github.com/coleam00/factory-mission-control/pull/103"');
-  expect(html).toContain('href="https://github.com/coleam00/factory-mission-control/issues/3"');
+  expect(html).toContain(
+    'href="http://127.0.0.1:3091/r/coleam00/factory-mission-control/pull/103"',
+  );
+  expect(html).toContain(
+    'href="http://127.0.0.1:3091/r/coleam00/factory-mission-control/issues/3"',
+  );
   expect(html).toContain('data-outcome="gate-refused"');
   expect(html).toContain('Gate refused');
   expect(html).toContain('data-gate-outcome="refused"');
@@ -130,7 +134,9 @@ test('a disposition naming a hidden line does not render in the header', () => {
 
 test('the pull request a step names by URL links as its number', () => {
   const html = render(<LapHeaderBody lap={{ ...refused, pr_number: 103 }} now={0} />);
-  expect(html).toContain('href="https://github.com/coleam00/factory-mission-control/pull/103"');
+  expect(html).toContain(
+    'href="http://127.0.0.1:3091/r/coleam00/factory-mission-control/pull/103"',
+  );
   expect(html).toContain('data-pr="103"');
   expect(html).toContain('>PR #103</a>');
 });

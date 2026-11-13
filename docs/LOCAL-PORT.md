@@ -233,9 +233,18 @@ at 1600 px on 22 addresses. Screenshots are in `proof/mission-control-*.png`.
 
 ## Known gaps and choices
 
-- Links the dashboard shows for issues and pull requests ("Answer on GitHub", Issue, PR #n) are the
-  forge's github.com-style URLs. They do not resolve. The forge's own board is
-  `http://127.0.0.1:3091`.
+- Issues, pull requests and comments keep the forge's github.com-style URLs as their identity in the
+  `mc` tables. Every link the dashboard renders for one ("Answer on GitHub", Issue, PR #n) opens its
+  page on the forge board instead (`app/lib/forge-links.ts`): `<forge web>/r/<owner>/<repo>/issues/<n>`
+  or `…/pull/<n>`, a comment anchor opening its item's page. The Board's older link is
+  `<forge web>/?state=all`. `<forge web>` is `MC_FORGE_WEB_URL`, default `http://127.0.0.1:3091`.
+  The link wording still says GitHub.
+- A pull request the forge has published to Bitbucket (its `publications` table; the newest row per
+  pull request wins) gets a Bitbucket link to `<code_web>/branch/<branch>` beside it on the work item
+  and the run page, when its factory's entry in the factories file has `code_web`. A forge database
+  without that table, or a factory without `code_web`, shows no Bitbucket links. The server writes the
+  links into the page when it serves it (`window.__MC_LINKS__`), so a publication made after the page
+  loaded shows after a reload.
 - Updates from the forge reach the dashboard on the next poll: up to 5 s (`MC_FORGE_POLL_MS`).
 - A label that an issue already had when the server started has no recorded time (the forge keeps
   none), so the owner queue counts its wait from the issue's last update, marked approximate. A label

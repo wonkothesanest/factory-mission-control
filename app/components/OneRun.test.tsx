@@ -130,14 +130,32 @@ test('the head titles the round with the cap the pinned map holds, and without i
 test('the head says what the run is, its state, workflow, pull request, time, cost and tokens', () => {
   const html = render();
   expect(html).toContain('data-title="Build #485, round 2"');
-  expect(html).toContain('href="https://github.com/coleam00/queue-factory/issues/485"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/coleam00/queue-factory/issues/485"');
   expect(html).toContain('>Failed<');
   expect(html).toContain('>archon-build-queue<');
-  expect(html).toContain('href="https://github.com/coleam00/queue-factory/pull/496"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/coleam00/queue-factory/pull/496"');
   expect(html).toContain('data-run-cost="13.75"');
   expect(html).toContain('data-run-tokens="7000000"');
   expect(html).toContain('1h 53m · $13.75 · 7,000,000 tokens in');
   expect(html).toContain('href="/f/queue-factory/runs"');
+  expect(html).not.toContain('data-link="bitbucket"');
+  expect(html).not.toContain('href="https://github.com');
+});
+
+test('a published pull request links its code on Bitbucket beside it', () => {
+  globalThis.__MC_LINKS__ = {
+    forgeWeb: 'http://127.0.0.1:3091',
+    bitbucket: {
+      'queue-factory': { '496': 'https://code.example.test/ws/q/branch/factory/pr-496-x' },
+    },
+  };
+  try {
+    expect(render()).toContain(
+      '<a data-link="bitbucket" href="https://code.example.test/ws/q/branch/factory/pr-496-x"',
+    );
+  } finally {
+    globalThis.__MC_LINKS__ = undefined;
+  }
 });
 
 test('a run waiting for a slot shows that state, not "Needs you"', () => {

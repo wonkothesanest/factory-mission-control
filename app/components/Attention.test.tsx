@@ -145,6 +145,21 @@ test('a card draws its parts in the README order: dot, title, age, meta, note, o
   expect(html).toContain('high confidence');
 });
 
+test("an owner item's link and option tiles open the issue on the forge board, never github.com", () => {
+  const question: OwnerQueueRow = {
+    ...owner,
+    kind: 'question',
+    issue_number: 18,
+    question_number: 1,
+    url: 'https://github.com/o/r/issues/18#issuecomment-5',
+    options: '[{"key":"A","text":"MIT"}]',
+  };
+  const html = render({ owner: ready([owner, question]) });
+  expect(html).toContain('href="http://127.0.0.1:3091/r/o/r/issues/17"');
+  expect(html.match(/href="http:\/\/127\.0\.0\.1:3091\/r\/o\/r\/issues\/18"/g)).toHaveLength(2);
+  expect(html).not.toContain('href="https://github.com');
+});
+
 test('an errored source says so, draws none of its stale rows, and the other groups still draw', () => {
   const html = render({
     decide: { rows: [decide], state: 'error' },

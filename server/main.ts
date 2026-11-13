@@ -6,6 +6,7 @@ import { createApp } from './app';
 import { resolveBuildId } from './build-id';
 import { loadCheckEnv } from './check-env';
 import { forgePollerFromEnv } from './forge-poller';
+import { linksFromEnv } from './links';
 import { liveFromEnv } from './live';
 import { managerFromEnv } from './manager';
 import { DEFAULT_PORT, SERVE_PORTS } from './ports';
@@ -79,6 +80,14 @@ if (forge) {
   console.warn('forge ingestion is off: set MC_FORGE_DB (and MC_APPS_DIR for pins)');
 }
 
+let links: ReturnType<typeof linksFromEnv>;
+try {
+  links = linksFromEnv(Bun.env, repoRoot);
+} catch (error) {
+  console.error(`links: ${error instanceof Error ? error.message : error}`);
+  process.exit(1);
+}
+
 const app = createApp({
   buildId: resolveBuildId(Bun.env, repoRoot),
   distDir,
@@ -86,6 +95,7 @@ const app = createApp({
   manager,
   actions,
   forge,
+  links,
 });
 const server = serve({ app, live, hostname: '127.0.0.1', port });
 console.log(`serving http://localhost:${server.port}`);

@@ -77,6 +77,8 @@ export interface ForgePoller {
   start(): void;
   stop(): Promise<void>;
   status(): ForgeStatus;
+  /** The newest published branch of each pull request, by factory, from the last forge read. */
+  published(): Map<string, Map<number, string>>;
 }
 
 const fingerprint = (value: unknown) =>
@@ -136,6 +138,7 @@ export function createForgePoller({
     repositories: {},
     pins: [],
   };
+  const published = new Map<string, Map<number, string>>();
   let timer: ReturnType<typeof setInterval> | undefined;
   let running: Promise<unknown> | undefined;
   let lastLogged = '';
@@ -233,6 +236,7 @@ export function createForgePoller({
       await removeGone(name, issues, comments, readAt, report);
       seen.issues.set(name, issues);
       seen.comments.set(name, comments);
+      published.set(name, repo.published);
       state.repositories[repo.repository.full_name] = {
         issues: repo.issues.length,
         pullRequests: repo.pullRequests.length,
@@ -378,6 +382,7 @@ export function createForgePoller({
       forge = undefined;
     },
     status: () => structuredClone(state),
+    published: () => structuredClone(published),
   };
 }
 

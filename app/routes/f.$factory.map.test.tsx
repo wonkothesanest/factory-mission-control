@@ -451,9 +451,10 @@ test('Right now links a lap entry to its page and to its GitHub issue, and only 
       />
     </MemoryRouter>,
   );
-  expect(html).toContain('href="https://github.com/o/r/issues/7"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/o/r/issues/7"');
   expect(html).toContain('/f/here/runs/bbbbbbbb-2');
   expect(html.match(/data-lap-issue/g)).toHaveLength(1);
+  expect(html).not.toContain('href="https://github.com');
 });
 
 test('Right now says a skipped reviewer was not earned, naming the lap by issue or by run', () => {
@@ -505,7 +506,7 @@ test('Right now links every run to its run page', () => {
   expect(html).toContain('/f/here/runs/queue-run');
   expect(html).toContain('/f/here/runs/queue-merge');
   expect(html).toContain('Queued');
-  expect(html).toContain('href="https://github.com/o/r/issues/9"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/o/r/issues/9"');
   expect(html).toContain('#5');
 });
 
@@ -594,7 +595,7 @@ test('Use the app lists each pull request under check with its verdict and its l
   const html = renderToStaticMarkup(
     <AppCheckList rows={[row(7, 'FAIL', { criteria: 3, probes: 1 }), row(8, null)]} />,
   );
-  expect(html).toContain('href="https://github.com/o/r/pull/7"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/o/r/pull/7"');
   expect(textOf(html)).toContain('FAIL  3 criteria, 1 probe, 2 assertions');
   expect(textOf(html)).toContain('checking  1 criterion, 0 probes, 2 assertions');
   expect(textOf(renderToStaticMarkup(<AppCheckList rows={[]} />))).toBe(
@@ -753,7 +754,7 @@ test('Right now draws each product document as a bar with its link and counts, a
       },
     ],
   });
-  expect(html).toContain('href="https://github.com/o/r/issues/410"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/o/r/issues/410"');
   expect(html).toContain('role="progressbar"');
   expect(html).toContain('aria-valuenow="2"');
   expect(html).toContain('aria-valuemax="4"');

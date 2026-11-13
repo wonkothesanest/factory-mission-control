@@ -2,6 +2,7 @@ import { join, resolve, sep } from 'node:path';
 import { Hono } from 'hono';
 import { type Actions, actionsRoutes } from './actions';
 import type { ForgePoller } from './forge-poller';
+import { DEFAULT_FORGE_WEB_URL, type Links, linksBoot, linksBootScript } from './links';
 import { type Live, liveBootScript, liveConfig, liveRoutes } from './live';
 import { type Manager, managerRoutes } from './manager';
 
@@ -16,10 +17,22 @@ interface AppOptions {
   /** Absent without MC_DATABASE_URL: no action is offered and the POST answers 503. */
   actions?: Actions;
   /** The local forge ingestion (local-factory port); absent without MC_DATABASE_URL. */
-  forge?: Pick<ForgePoller, 'status'>;
+  forge?: Pick<ForgePoller, 'status' | 'published'>;
+  /** The forge board's base and each factory's code_web; absent means the default board and no Bitbucket links. */
+  links?: Links;
 }
 
-export function createApp({ buildId, distDir, live, manager, actions, forge }: AppOptions): Hono {
+const NO_LINKS: Links = { forgeWeb: DEFAULT_FORGE_WEB_URL, codeWeb: new Map() };
+
+export function createApp({
+  buildId,
+  distDir,
+  live,
+  manager,
+  actions,
+  forge,
+  links = NO_LINKS,
+}: AppOptions): Hono {
   const root = resolve(distDir);
   const app = new Hono();
 
@@ -39,13 +52,11 @@ export function createApp({ buildId, distDir, live, manager, actions, forge }: A
       const file = Bun.file(asset);
       if (await file.exists()) return new Response(file);
     }
-    const index = Bun.file(join(root, 'index.html'));
-    if (!live) return new Response(index);
-    const html = (await index.text()).replace(
-      '<head>',
-      `<head>${liveBootScript(liveConfig(live))}`,
-    );
-    return c.html(html);
+    const boot =
+      (live ? liveBootScript(liveConfig(live)) : '') +
+      linksBootScript(linksBoot(links, forge?.published() ?? new Map()));
+    const html = await Bun.file(join(root, 'index.html')).text();
+    return c.html(html.replace('<head>', `<head>${boot}`));
   });
 
   return app;

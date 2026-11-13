@@ -183,7 +183,7 @@ test('Merged keeps the last 7 days, newest first, and counts the rest as older',
   });
   expect(column(v, 'merged')).toEqual([2, 1]);
   expect(v.older).toBe(3);
-  expect(v.olderHref).toBe('https://github.com/o/r/issues?q=is%3Aissue+is%3Aclosed');
+  expect(v.olderHref).toBe('http://127.0.0.1:3091/?state=all');
 });
 
 test('the order filter narrows the columns, not the panels or the count outside orders', () => {

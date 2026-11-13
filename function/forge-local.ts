@@ -3,8 +3,9 @@
 // (forge/state/forge.db, WAL), with github.com-style URLs and GitHub's numbering. This module opens
 // that file READ-ONLY and maps its rows into the shapes GitHub's webhook payloads carry
 // (function/ingest.ts reads exactly those fields), so the forge seam (function/forge-seam.ts)
-// stores them with the webhook's own upserts. It never writes the file, and each snapshot is one
-// short read transaction.
+// stores them with the webhook's own upserts. It also reads which branch each pull request was last
+// published to (the forge's `publications`, when it has that table), for the dashboard's links to
+// the published code. It never writes the file, and each snapshot is one short read transaction.
 
 import { Database } from 'bun:sqlite';
 import type { Comment, Issue, PullRequest } from './ingest';
@@ -25,6 +26,8 @@ export interface ForgeRepoSnapshot {
   pullRequests: PullRequest[];
   /** Each comment with the issue or pull request it is on, as GitHub's `issue_comment` names it. */
   comments: { issue: Issue; comment: Comment }[];
+  /** Pull request number to the branch of its newest publication; empty when the forge has no `publications` table. */
+  published: Map<number, string>;
 }
 
 /** Each repository asked for that the forge holds, by its `owner/name` in lower case. */
@@ -129,6 +132,10 @@ export function readForgeSnapshot(db: Database, repositories: string[]): ForgeSn
   const snapshot: ForgeSnapshot = new Map();
   db.exec('BEGIN');
   try {
+    const hasPublications =
+      db
+        .query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'publications'")
+        .get() !== null;
     const repos = db.query('SELECT id, owner, name FROM repos ORDER BY id').all() as {
       id: number;
       owner: string;
@@ -165,6 +172,14 @@ export function readForgeSnapshot(db: Database, repositories: string[]): ForgeSn
       for (const { item_id, name } of labelRows) {
         labels.set(item_id, [...(labels.get(item_id) ?? []), name]);
       }
+      const published = new Map<number, string>();
+      if (hasPublications) {
+        // In id order, so the newest publication of each pull request is the one kept.
+        const rows = db
+          .query('SELECT number, branch FROM publications WHERE repo_id = ? ORDER BY id')
+          .all(repo.id) as { number: number; branch: string }[];
+        for (const { number, branch } of rows) published.set(number, branch);
+      }
       const byId = new Map(items.map((item) => [item.id, item]));
       const issueById = new Map(
         items.map((item) => [item.id, issueOf(full, item, labels.get(item.id) ?? [])]),
@@ -178,6 +193,7 @@ export function readForgeSnapshot(db: Database, repositories: string[]): ForgeSn
           const issue = issueById.get(row.item_id);
           return item && issue ? [{ issue, comment: commentOf(full, item, row) }] : [];
         }),
+        published,
       });
     }
   } finally {

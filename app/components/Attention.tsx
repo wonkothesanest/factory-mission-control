@@ -22,6 +22,7 @@ import {
 import { type AnswerRequest, TEXT_ANSWER_DETAIL } from '../lib/actions';
 import { ANSWER_TEXT_MAX, type DecideRow, type UnstickRow } from '../lib/attention';
 import type { FailureGroupRow, RetriedRunRow } from '../lib/failures';
+import { forgeHref } from '../lib/forge-links';
 import { since } from '../lib/laps';
 import { lapHref } from '../lib/one-lap';
 import { clock, shortRunId } from '../lib/format';
@@ -106,7 +107,7 @@ export function ActionControl({ action, act }: { action: Action; act: Act }): Re
   return (
     <a
       {...action.hooks}
-      href={href}
+      href={forgeHref(href)}
       target="_blank"
       rel="noreferrer"
       className={buttonClass(action.variant)}
@@ -258,7 +259,7 @@ function CardView({
                   }
                 : tile.href === null
                   ? {}
-                  : { href: tile.href };
+                  : { href: forgeHref(tile.href) };
             return (
               <OptionTile
                 key={tile.id}

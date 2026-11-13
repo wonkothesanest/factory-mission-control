@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createMemoryRouter, RouterProvider } from 'react-router';
+import type { ItemOnBoard } from '../lib/board';
 import type { TimelineEvent } from '../lib/work-item';
 import Work from '../routes/f.$factory.work.$n';
 import { WorkItemBody } from './WorkItem';
@@ -45,12 +46,38 @@ test('the header links the issue, the pull request and the newest run, under the
     />,
   );
   expect(html).toContain('work item #407');
-  expect(html).toContain('href="https://github.com/o/r/issues/407"');
-  expect(html).toContain('href="https://github.com/o/r/pull/410"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/o/r/issues/407"');
+  expect(html).toContain('href="http://127.0.0.1:3091/r/o/r/pull/410"');
   expect(html).toContain('PR #410');
   expect(html).toContain('Runs in console');
   expect(html).toContain('data-column="merged"');
   expect(html).toContain('screens');
+  expect(html).not.toContain('data-link="bitbucket"');
+});
+
+test("a published pull request's code on Bitbucket is linked beside it, and only with a pull request", () => {
+  const bitbucket = 'https://code.example.test/ws/r/branch/factory/pr-410-x';
+  const board: ItemOnBoard = {
+    column: { id: 'merged', title: 'Merged', role: 'test', holder: 'done' },
+    pr: 410,
+    prUrl: 'https://github.com/o/r/pull/410',
+    workOrders: [],
+  };
+  const html = render(
+    <WorkItemBody header={header} events={[]} note={null} board={board} bitbucket={bitbucket} />,
+  );
+  expect(html).toContain(`<a data-link="bitbucket" href="${bitbucket}"`);
+  expect(
+    render(
+      <WorkItemBody
+        header={header}
+        events={[]}
+        note={null}
+        board={{ ...board, pr: null, prUrl: null }}
+        bitbucket={bitbucket}
+      />,
+    ),
+  ).not.toContain('data-link="bitbucket"');
 });
 
 test('rows come in the order given, with their reason, and a lap row links its lap page', () => {

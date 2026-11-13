@@ -350,6 +350,47 @@ test('the forge file is only ever read: polling leaves it byte for byte, and its
   reader.close();
 });
 
+test("each pull request's newest publication is read, per factory; a forge without the table has none", async () => {
+  seedForge();
+  const p = poller();
+  await p.pollOnce();
+  expect(p.published()).toEqual(
+    new Map([
+      ['widgets', new Map()],
+      ['gadgets', new Map()],
+    ]),
+  );
+
+  // forge/src/db.ts's publications table, which an older forge does not have.
+  forge.db.exec(`CREATE TABLE publications (id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id INTEGER NOT NULL REFERENCES repos(id), number INTEGER NOT NULL, branch TEXT NOT NULL,
+    commit_sha TEXT NOT NULL, head_oid TEXT NOT NULL, published_at TEXT NOT NULL)`);
+  const publish = (repoId: number, number: number, branch: string) =>
+    forge.db
+      .query(
+        `INSERT INTO publications (repo_id, number, branch, commit_sha, head_oid, published_at)
+         VALUES (?, ?, ?, 'c', 'h', ?)`,
+      )
+      .run(repoId, number, branch, forge.at());
+  publish(1, 2, 'factory/pr-2-old');
+  publish(2, 2, 'factory/pr-2-gadgets');
+  publish(1, 2, 'factory/pr-2-new');
+  publish(1, 7, 'factory/pr-7-x');
+  await p.pollOnce();
+  expect(p.published()).toEqual(
+    new Map([
+      [
+        'widgets',
+        new Map([
+          [2, 'factory/pr-2-new'],
+          [7, 'factory/pr-7-x'],
+        ]),
+      ],
+      ['gadgets', new Map([[2, 'factory/pr-2-gadgets']])],
+    ]),
+  );
+});
+
 test('a missing forge file is waited for, not an error; pins still load', async () => {
   const apps = join(dir, 'apps');
   mkdirSync(join(apps, 'widgets', 'factory'), { recursive: true });
