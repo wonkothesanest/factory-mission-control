@@ -3,6 +3,13 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import factories from '../factories.json';
 import { readFactories } from '../server/factories';
+import {
+  ADOPT_SQL,
+  attachGuard,
+  ensureLiveNotify,
+  type ShortLockOptions,
+  withShortLocks,
+} from './lib/archon-guard';
 import { failing, guardedDatabaseUrl, type Main, runCli } from './lib/cli';
 import type { Db } from './lib/db';
 import { loadFactories } from './lib/load-factories';
@@ -89,28 +96,59 @@ export function migrationsDir(repoRoot: string): string {
   return join(repoRoot, 'db', 'migrations');
 }
 
-/** Applies each file not yet recorded, file and record in one transaction; returns those applied. */
+/**
+ * The ledger of applied migrations. local-factory port: it lives in the dashboard's own
+ * schema `mc_meta`, not in `public`, which is Archon's.
+ */
+export const LEDGER = 'mc_meta.schema_migrations';
+
+/**
+ * Applies each file not yet recorded, file and record in one transaction; returns those applied.
+ * In the same transaction, any trigger the file put on an Archon table moves onto its shadow in
+ * `mc_guard` (scripts/lib/archon-guard.ts ADOPT_SQL), so Archon's tables never carry one. After the
+ * files, every dashboard table gets its live-update NOTIFY trigger, and, unless `guard` is false,
+ * the guard triggers that feed the projection from Archon's tables are attached (attachGuard: no
+ * DDL when they are already in place).
+ *
+ * A migration can lock an Archon table (a trigger on it, or ADOPT_SQL moving one off it), and
+ * Archon's writes queue behind a DDL that waits for its lock. So every transaction here waits at
+ * most DDL_LOCK_TIMEOUT for any lock and is retried after a pause (withShortLocks), and the
+ * guard's DDL is never folded into a migration's transaction.
+ */
 export async function runMigrations({
   files,
   db,
+  guard = true,
+  ...locks
 }: {
   files: MigrationFile[];
   db: Db;
-}): Promise<string[]> {
-  await db.query(
-    'CREATE TABLE IF NOT EXISTS mc_schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())',
-  );
+  guard?: boolean;
+} & ShortLockOptions): Promise<string[]> {
+  // Created only when missing: a run with nothing to apply issues no DDL at all.
+  const [ledger] = await db.query(`SELECT to_regclass('${LEDGER}') IS NOT NULL AS present`);
+  if (ledger?.present !== true) {
+    await db.query('CREATE SCHEMA IF NOT EXISTS mc_meta');
+    await db.query(
+      `CREATE TABLE IF NOT EXISTS ${LEDGER} (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
+    );
+  }
   const recorded = new Set(
-    (await db.query('SELECT name FROM mc_schema_migrations')).map((row) => String(row.name)),
+    (await db.query(`SELECT name FROM ${LEDGER}`)).map((row) => String(row.name)),
   );
   const applied: string[] = [];
   for (const file of files) {
     if (recorded.has(file.name)) continue;
     try {
-      await db.transaction(async (tx) => {
-        await tx.query(file.sql);
-        await tx.query('INSERT INTO mc_schema_migrations (name) VALUES ($1)', [file.name]);
-      });
+      await withShortLocks(
+        db,
+        async (tx) => {
+          await tx.query(file.sql);
+          await tx.query(ADOPT_SQL);
+          await tx.query(`INSERT INTO ${LEDGER} (name) VALUES ($1)`, [file.name]);
+        },
+        locks,
+      );
     } catch (error) {
       const committed = applied.length > 0 ? ` after applying ${applied.join(', ')}` : '';
       const reason = error instanceof Error ? error.message : String(error);
@@ -118,23 +156,31 @@ export async function runMigrations({
     }
     applied.push(file.name);
   }
+  // Only the dashboard's own tables: a NOTIFY trigger on each mc table that lacks one (no DDL
+  // when every table has one and the function is current).
+  await withShortLocks(db, (tx) => ensureLiveNotify(tx), locks);
+  if (guard) await attachGuard(db, locks);
   return applied;
 }
 
 const USAGE = [
-  'usage: bun run migrate (the check branch in .mc-check.env) | bun run migrate:main (the owner, at a terminal)',
-  '  After adding a factory, load it and attribute its existing laps on the live branch:',
+  'usage: bun run migrate (the check database in .mc-check.env) | bun run migrate:main (the live dashboard database)',
+  '  After adding a factory, load it and attribute its existing laps on the live database:',
   '  bun run migrate -- --configured-factories (check-* only)',
-  '  bun run migrate:main -- --configured-factories (main only, owner confirmation at a terminal)',
+  '  bun run migrate:main -- --configured-factories (the live database; the operator confirms its name at a terminal, or MC_OWNER_CONFIRM names it)',
   '  --configured-factories reads MC_FACTORIES_FILE when nonempty, otherwise the repository factories.json.',
-  '  Use the same MC_DATABASE_URL and MC_FACTORIES_FILE environment as the server; .mc-check.env fills unset values.',
-  '  NEON_API_KEY and NEON_PROJECT_ID are required to verify the database branch before connecting.',
-  '  Rewind branches are read-only: switch back and target the live branch if setup is still needed.',
+  "  --no-attach applies the migrations without the guard triggers on Archon's tables (as bin/detach.sh left them).",
+  '  Use the same MC_DATABASE_URL and MC_FACTORIES_FILE as the server; .mc-check.env fills unset values.',
   '  Without --configured-factories, migrate loads the committed factories.json regardless of MC_FACTORIES_FILE.',
 ].join('\n');
 
 export const main: Main = async (argv, deps) => {
-  let values: { main?: boolean; help?: boolean; 'configured-factories'?: boolean };
+  let values: {
+    main?: boolean;
+    help?: boolean;
+    'configured-factories'?: boolean;
+    'no-attach'?: boolean;
+  };
   try {
     ({ values } = parseArgs({
       args: argv,
@@ -142,6 +188,7 @@ export const main: Main = async (argv, deps) => {
         main: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         'configured-factories': { type: 'boolean' },
+        'no-attach': { type: 'boolean' },
       },
     }));
   } catch (error) {
@@ -155,8 +202,8 @@ export const main: Main = async (argv, deps) => {
   const target = values.main ? 'main' : 'check';
   return failing(deps, async () => {
     const url = await guardedDatabaseUrl(deps, target);
-    if (target === 'main' && !deps.confirmOwner(deps.env.NEON_PROJECT_ID ?? '')) {
-      throw new Error('migrate:main is for the owner, at a terminal');
+    if (target === 'main' && !deps.confirmOwner(await deps.databaseName(url))) {
+      throw new Error('migrate:main is for the owner, at a terminal (or MC_OWNER_CONFIRM)');
     }
     const entries = values['configured-factories']
       ? readFactories(deps.env, deps.repoRoot)
@@ -166,6 +213,7 @@ export const main: Main = async (argv, deps) => {
       const applied = await runMigrations({
         files: readMigrationFiles(migrationsDir(deps.repoRoot)),
         db,
+        guard: !values['no-attach'],
       });
       for (const name of applied) deps.out(`applied ${name}`);
       deps.out(`applied ${applied.length} migration(s)`);

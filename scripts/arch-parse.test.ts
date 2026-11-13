@@ -11,17 +11,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { ARCHON_TABLES, testDb } from '../db/test-db';
-import type { GetFetch } from '../function/github';
 import { FACTORY_PACKAGE_DIR, HOOKS_DIR, parsePack, type Step } from '../parsers/pack';
-import {
-  ARCH_TABLES,
-  ARCHON_REPOSITORY,
-  archRows,
-  FACTORY_HOOKS_DIR,
-  FACTORY_REPOSITORY,
-  main,
-  PACK_DIR,
-} from './arch-parse';
+import { ARCH_TABLES, archRows, main } from './arch-parse';
 import { REPO_ROOT } from './lib/cli';
 import type { Db } from './lib/db';
 import { DATABASE_URL, recordingDeps, scratchRepo } from './lib/test-deps';
@@ -29,7 +20,6 @@ import { migrationsDir, readMigrationFiles, runMigrations } from './migrate';
 
 const PACK = join(REPO_ROOT, 'fixtures/pack');
 const TEMPLATE = join(REPO_ROOT, 'fixtures/factory-template');
-const TEMPLATE_HOOKS = join(TEMPLATE, HOOKS_DIR);
 const ARCHON_SHA = readFileSync(join(PACK, 'ARCHON_COMMIT'), 'utf8').trim();
 const FACTORY_SHA = readFileSync(join(TEMPLATE, 'FACTORY_COMMIT'), 'utf8').trim();
 const PACKAGE = join(PACK, 'queue/factory');
@@ -152,9 +142,9 @@ test('a CRLF checkout stores the same rows as an LF one', async () => {
 test.each(['main', 'fixture'])(
   'refuses target branch %s before reading or writing anything',
   async (branchName) => {
-    const job = await run([ARCHON_SHA, FACTORY_SHA], { branchName });
+    const job = await run([ARCHON_SHA, FACTORY_SHA, ...LOCAL], { branchName });
     expect(job.exit).toBe(1);
-    expect(job.err.join('\n')).toContain(`refusing branch '${branchName}'`);
+    expect(job.err.join('\n')).toContain(`refusing database '${branchName}'`);
     expect(job.opened).toEqual([]);
     expect(job.requests).toEqual([]);
     expect(await pg.query('SELECT 1 FROM mc.arch_versions')).toEqual([]);
@@ -240,7 +230,7 @@ test.each([[[]], [[ARCHON_SHA]], [['not-a-sha', FACTORY_SHA]]])(
     const job = await run(argv);
     expect(job.exit).toBe(2);
     expect(job.err.join('\n')).toContain('usage: bun run arch:parse');
-    expect(job.neonCalls).toEqual([]);
+    expect(job.resolved).toEqual([]);
   },
 );
 
@@ -253,98 +243,6 @@ function filesOf(dir: string, at = dir): string[] {
       : [relative(dir, path).replaceAll('\\', '/')];
   });
 }
-
-/** A holdout scenario beside the template's hooks, which the job must never request. */
-const HOLDOUT = 'template/.factory/holdouts/H-01.md';
-
-/**
- * GitHub's API and raw files over the two repositories, each holding its fixture where the real
- * repository keeps it.
- */
-function fakeGitHub(factory: 'template' | 'package' | 'empty' = 'template'): GetFetch {
-  const repos = new Map<string, { sha: string; files: Map<string, string> }>();
-  const mount = (repository: string, sha: string, at: string, dir: string) => {
-    const repo = repos.get(repository) ?? { sha, files: new Map<string, string>() };
-    for (const file of filesOf(dir)) repo.files.set(`${at}/${file}`, join(dir, file));
-    repos.set(repository, repo);
-  };
-  mount(ARCHON_REPOSITORY, ARCHON_SHA, PACK_DIR, join(PACK, 'sdlc'));
-  if (factory === 'template') {
-    mount(FACTORY_REPOSITORY, FACTORY_SHA, FACTORY_HOOKS_DIR, TEMPLATE_HOOKS);
-  }
-  if (factory === 'package') mount(FACTORY_REPOSITORY, PACKAGE_SHA, FACTORY_PACKAGE_DIR, PACKAGE);
-  if (factory === 'empty') repos.set(FACTORY_REPOSITORY, { sha: FACTORY_SHA, files: new Map() });
-  repos.get(FACTORY_REPOSITORY)?.files.set(HOLDOUT, join(TEMPLATE, 'FACTORY_COMMIT'));
-
-  const trees: { repository: string; dir: string }[] = [];
-  const treeSha = (repository: string, dir: string) => {
-    const known = trees.findIndex((t) => t.repository === repository && t.dir === dir);
-    return String(known >= 0 ? known : trees.push({ repository, dir }) - 1);
-  };
-  const below = (dir: string, path: string) => (dir === '' ? path : path.slice(dir.length + 1));
-
-  return async (url) => {
-    const { host, pathname, searchParams } = new URL(url);
-    const parts = pathname.slice(1).split('/').map(decodeURIComponent);
-    if (host === 'raw.githubusercontent.com') {
-      const [owner, name, sha, ...path] = parts;
-      const repo = repos.get(`${owner}/${name}`);
-      const file = repo?.sha === sha ? repo.files.get(path.join('/')) : undefined;
-      return file ? new Response(readFileSync(file)) : new Response('', { status: 404 });
-    }
-    const [, owner, name, kind, ...rest] = parts;
-    const repository = `${owner}/${name}`;
-    const repo = repos.get(repository);
-    if (kind === 'commits' && repo?.sha.startsWith(rest[0] ?? '-')) {
-      return Response.json({ sha: repo.sha, commit: { tree: { sha: treeSha(repository, '') } } });
-    }
-    const tree = kind === 'git' && rest[0] === 'trees' ? trees[Number(rest[1])] : undefined;
-    if (!repo || !tree) return new Response('', { status: 404 });
-    const paths = [...repo.files.keys()]
-      .filter((path) => tree.dir === '' || path.startsWith(`${tree.dir}/`))
-      .map((path) => below(tree.dir, path));
-    if (searchParams.get('recursive')) {
-      return Response.json({
-        truncated: false,
-        tree: paths.map((path) => ({ path, type: 'blob', sha: 'blob' })),
-      });
-    }
-    const children = new Map(
-      paths.map((path) => {
-        const [child = '', ...deeper] = path.split('/');
-        return [child, deeper.length > 0 ? 'tree' : 'blob'];
-      }),
-    );
-    return Response.json({
-      tree: [...children].map(([path, type]) => ({
-        path,
-        type,
-        sha: treeSha(repository, tree.dir === '' ? path : `${tree.dir}/${path}`),
-      })),
-    });
-  };
-}
-
-test('reads a version from GitHub with GETs only, and nothing of the template but its hooks', async () => {
-  const local = await run([ARCHON_SHA, FACTORY_SHA, ...LOCAL]);
-  expect(local.exit).toBe(0);
-  const localRows = await everyRow();
-  for (const table of TABLES) await pg.query(`DELETE FROM mc.${table}`);
-
-  const remote = await run([ARCHON_SHA.slice(0, 8), FACTORY_SHA.slice(0, 8)], {
-    fetch: fakeGitHub(),
-  });
-  expect(remote.err).toEqual([]);
-  expect(remote.exit).toBe(0);
-  expect(remote.out).toEqual(local.out);
-  expect(await everyRow()).toEqual(localRows);
-
-  expect(remote.requests.length).toBeGreaterThan(0);
-  for (const request of remote.requests) expect(request).toStartWith('GET https://');
-  const raw = remote.requests.filter((r) => r.startsWith('GET https://raw.githubusercontent.com/'));
-  expect(raw).toHaveLength(filesOf(join(PACK, 'sdlc')).length + filesOf(TEMPLATE_HOOKS).length);
-  expect(remote.requests.filter((r) => r.includes('/.factory/holdouts/'))).toEqual([]);
-});
 
 const PACKAGE_ONLY = ['--archon-path', PACK, '--package-path', PACKAGE];
 
@@ -370,32 +268,38 @@ test('stores the factory package at the commit the package records, with no hook
   expect(texts).toHaveLength(1);
 });
 
-test('reads a factory commit that has the package and no hooks from GitHub, as the local run does', async () => {
-  expect((await run([ARCHON_SHA, PACKAGE_SHA, ...PACKAGE_ONLY])).exit).toBe(0);
-  const localRows = await everyRow();
-  for (const table of TABLES) await pg.query(`DELETE FROM mc.${table}`);
-
-  const remote = await run([ARCHON_SHA.slice(0, 8), PACKAGE_SHA.slice(0, 8)], {
-    fetch: fakeGitHub('package'),
-  });
-  expect(remote.err).toEqual([]);
-  expect(remote.exit).toBe(0);
-  expect(await everyRow()).toEqual(localRows);
-  for (const request of remote.requests) expect(request).toStartWith('GET https://');
-  const raw = remote.requests.filter((r) => r.startsWith('GET https://raw.githubusercontent.com/'));
-  expect(raw).toHaveLength(filesOf(join(PACK, 'sdlc')).length + filesOf(PACKAGE).length);
-  expect(remote.requests.filter((r) => r.includes('/.factory/holdouts/'))).toEqual([]);
+test.each([
+  ['no paths', [ARCHON_SHA, FACTORY_SHA]],
+  ['no factory side', [ARCHON_SHA, FACTORY_SHA, '--archon-path', PACK]],
+  ['no pack', [ARCHON_SHA, FACTORY_SHA, '--factory-path', TEMPLATE]],
+])('reads local paths only: %s exits 2 and reaches nothing', async (_, argv) => {
+  const job = await run(argv);
+  expect(job.exit).toBe(2);
+  expect(job.err.join('\n')).toContain('read locally');
+  expect(job.requests).toEqual([]);
+  expect(job.resolved).toEqual([]);
+  expect(job.opened).toEqual([]);
 });
 
-test('refuses a factory commit with neither the hooks nor the package', async () => {
-  const job = await run([ARCHON_SHA.slice(0, 8), FACTORY_SHA.slice(0, 8)], {
-    fetch: fakeGitHub('empty'),
-  });
-  expect(job.exit).toBe(1);
-  expect(job.err.join(' ')).toContain(
-    `has neither ${FACTORY_HOOKS_DIR}/ nor ${FACTORY_PACKAGE_DIR}/`,
+test('--if-missing stores a version that is not stored, and leaves a stored one untouched', async () => {
+  const first = await run([ARCHON_SHA, FACTORY_SHA, ...LOCAL, '--if-missing']);
+  expect(first.err).toEqual([]);
+  expect(first.exit).toBe(0);
+  expect(counts(first.out)).toContain('mc.arch_versions 1');
+  const before = await everyRow();
+  const versions = () =>
+    pg.query('SELECT xmin::text AS x FROM mc.arch_steps ORDER BY archon_sha, workflow, path');
+  const rowVersions = await versions();
+
+  const again = await run(
+    [ARCHON_SHA, FACTORY_SHA, ...LOCAL, '--if-missing'],
+    {},
+    new Date('2026-10-25T00:00Z'),
   );
-  expect(job.opened).toEqual([]);
+  expect(again.exit).toBe(0);
+  expect(again.out).toEqual([`archon ${ARCHON_SHA} factory ${FACTORY_SHA} already stored`]);
+  expect(await everyRow()).toEqual(before);
+  expect(await versions()).toEqual(rowVersions);
 });
 
 test('refuses a template and a package that record different commits', async () => {

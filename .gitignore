@@ -28,3 +28,7 @@ dist/
 
 # Browser-tool scratch a review lens writes into the checkout (failed #630 r3, #647 r2 on mutates_checkout)
 .playwright-cli/
+
+# local port: local scratch, the detach marker and the check database file
+.tmp/
+.detached

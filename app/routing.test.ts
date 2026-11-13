@@ -2,11 +2,11 @@ import { afterAll, expect, test } from 'bun:test';
 import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RealtimeClient } from '@neon/realtime/client';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createMemoryRouter, RouterProvider, useParams } from 'react-router';
 import { PLACES } from './lib/places';
+import type { LiveClient } from './live/client';
 import { FactoryProvider } from './live/FactoryProvider';
 import { type Live, LiveContext } from './live/LiveProvider';
 import { globRoutes } from './route-files';
@@ -180,8 +180,8 @@ test('/f/<factory> leaves Attention for the map when the address is an old map l
 });
 
 test('/ says no factory is configured when the server is ready and serves none', () => {
-  const client = {} as RealtimeClient;
-  const none: Live = { status: 'ready', factories: [], client, homeClient: client, rewind: null };
+  const client = {} as LiveClient;
+  const none: Live = { status: 'ready', factories: [], client };
   const router = createMemoryRouter(
     [
       {

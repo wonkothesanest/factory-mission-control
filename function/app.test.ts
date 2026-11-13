@@ -48,6 +48,7 @@ Version: abd85896
 
 /** The full sha the appendix pin's pack file pins; its subject names `abd85896`. */
 const PINNED = 'abd85896e7971c9ac5199ed7e87973f27130250f';
+const RECORDED_API_ROOT = 'https://api.github.com';
 const PACK_URL = `https://api.github.com/repos/coleam00/ai-software-factory/contents/${PACK_PATH}?ref=85d479ad987dd63e441622ecb03db65233e8a803`;
 const DECISIONS_URL =
   'https://api.github.com/repos/coleam00/ai-software-factory/contents/DECISIONS.md?ref=main';
@@ -85,7 +86,7 @@ beforeEach(async () => {
     secret: SECRET,
     db,
     factories: factories.factories,
-    github: createGitHub(fetch),
+    github: createGitHub(fetch, RECORDED_API_ROOT),
   });
 });
 afterEach(() => db.close());
@@ -745,7 +746,7 @@ test.each([
       },
     },
     factories: factories.factories,
-    github: createGitHub(async (url) => respond(url)),
+    github: createGitHub(async (url) => respond(url), RECORDED_API_ROOT),
   });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   const error = spyOn(console, 'error').mockImplementation(() => {});
@@ -781,7 +782,7 @@ test.each([
         },
       },
       factories: factories.factories,
-      github: createGitHub(async (url) => respond(url)),
+      github: createGitHub(async (url) => respond(url), RECORDED_API_ROOT),
     });
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
     try {

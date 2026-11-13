@@ -21,9 +21,8 @@ test.each(['main', 'fixture', 'rewind-x'])(
   async (branchName) => {
     const run = recordingDeps({ repoRoot: repo(), branchName });
     expect(await main(['step'], run.deps)).not.toBe(0);
-    expect(run.mutatingCalls).toEqual([]);
     expect(run.opened).toEqual([]);
-    expect(run.err.join('\n')).toContain(`refusing branch '${branchName}'`);
+    expect(run.err.join('\n')).toContain(`refusing database '${branchName}'`);
   },
 );
 
@@ -34,10 +33,10 @@ test.each([
   [['label', '--error', 'ECONNRESET']],
   [['step', '--error', 'ECONNRESET']],
   [[]],
-])('exits 2 with usage for %j before touching Neon', async (argv) => {
+])('exits 2 with usage for %j before resolving the database', async (argv) => {
   const run = recordingDeps({ repoRoot: repo() });
   expect(await main(argv, run.deps)).toBe(2);
-  expect(run.neonCalls).toEqual([]);
+  expect(run.resolved).toEqual([]);
   expect(run.err.join('\n')).toContain('usage: bun run fixture:write step');
 });
 
@@ -156,7 +155,7 @@ describe.each(ROW_KINDS)('the %s kind', (kind, table) => {
       const run = recordingDeps({ repoRoot: repo(), branchName });
       expect(await main([kind], run.deps)).toBe(1);
       expect(run.opened).toEqual([]);
-      expect(run.err.join('\n')).toContain(`refusing branch '${branchName}'`);
+      expect(run.err.join('\n')).toContain(`refusing database '${branchName}'`);
     },
   );
 

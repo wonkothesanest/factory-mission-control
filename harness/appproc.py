@@ -1,6 +1,6 @@
 """Reach the software under test. Three shapes cover almost everything.
 
-    http     a server. Started on a free port in 8850-8864, polled until it answers.
+    http     a server. Started on a free port in 3092-3099, polled until it answers.
     cli      a command. Invoked with args; stdout, stderr and exit code asserted.
     library  no process at all. The E2E imports it and calls it.
 
@@ -52,9 +52,9 @@ class AppDidNotStart(RuntimeError):
     pass
 
 
-# Realtime accepts browser origins http://localhost:8850 through 8864 and no others, so an app
-# on any other port serves no live data (engineering.md: ports 8850-8864 only).
-APP_PORTS = range(8850, 8865)
+# local-factory port: the server accepts ports 3092-3099 (server/ports.ts); 3092 is the
+# factory's own dashboard, so an app check takes a free one above it.
+APP_PORTS = range(3092, 3100)
 
 
 def _free_port() -> int:

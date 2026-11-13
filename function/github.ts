@@ -1,5 +1,10 @@
-// The only way the Function and the scripts reach GitHub. Requests are GETs by type, never anything
+// GitHub-shaped reads for the ingestion and the scripts. Requests are GETs by type, never anything
 // else (invariant 2: read-only toward the factories).
+//
+// local-factory port: network ingestion from GitHub is disabled. Nothing here has a network
+// default any more: `createGitHub` needs a fetch handed to it, and the dashboard's own defaults are
+// `offlineGitHub` / `offlineFetch`, which refuse every read. The local forge (GitHub-shaped issues,
+// pull requests and comments in SQLite) plugs in through `function/forge-seam.ts`.
 
 export type GetFetch = (
   url: string,
@@ -15,8 +20,6 @@ export interface GitHub {
   list<T>(path: string): Promise<T[]>;
 }
 
-export const API_ROOT = 'https://api.github.com';
-
 /** GitHub answered a GET with a status other than success (or, for `fileAt`, 404). */
 export class GitHubError extends Error {
   constructor(
@@ -29,8 +32,12 @@ export class GitHubError extends Error {
 
 const NEXT_PAGE = /<([^>]+)>;\s*rel="next"/;
 
-/** `token`, when given, only raises the rate limit; every repository read here is public. */
-export function createGitHub(fetch: GetFetch = globalThis.fetch, token?: string): GitHub {
+/**
+ * GitHub's REST shape over `fetch`, rooted at `apiRoot`, which has no default (nothing here names
+ * a network host): for a forge that serves the same shape locally, or a test's recorded answers.
+ * `token`, when given, goes as a bearer token.
+ */
+export function createGitHub(fetch: GetFetch, apiRoot: string, token?: string): GitHub {
   async function request(url: string, accept: string): Promise<Response> {
     const headers: Record<string, string> = {
       accept,
@@ -49,24 +56,54 @@ export function createGitHub(fetch: GetFetch = globalThis.fetch, token?: string)
 
   return {
     async fileAt(repository, path, ref) {
-      const url = `${API_ROOT}/repos/${repository}/contents/${path}?ref=${encodeURIComponent(ref)}`;
+      const url = `${apiRoot}/repos/${repository}/contents/${path}?ref=${encodeURIComponent(ref)}`;
       const response = await request(url, 'application/vnd.github.raw+json');
       if (response.status === 404) return null;
       if (!response.ok) throw new GitHubError(url, response.status);
       return response.text();
     },
     async get<T>(path: string) {
-      return (await (await json(`${API_ROOT}${path}`)).json()) as T;
+      return (await (await json(`${apiRoot}${path}`)).json()) as T;
     },
     async list<T>(path: string) {
       const items: T[] = [];
-      let url: string | undefined = `${API_ROOT}${path}`;
+      let url: string | undefined = `${apiRoot}${path}`;
       while (url) {
         const response = await json(url);
         items.push(...((await response.json()) as T[]));
         url = NEXT_PAGE.exec(response.headers.get('link') ?? '')?.[1];
       }
       return items;
+    },
+  };
+}
+
+/** Thrown by every offline read: GitHub ingestion is disabled until the local forge is plugged in. */
+export class ForgeOffline extends Error {
+  constructor(what: string) {
+    super(
+      `${what}: GitHub network ingestion is disabled in this install; plug the local forge in at function/forge-seam.ts`,
+    );
+    this.name = 'ForgeOffline';
+  }
+}
+
+/** A fetch that never reaches the network. */
+export const offlineFetch: GetFetch = async (url) => {
+  throw new ForgeOffline(`GET ${url}`);
+};
+
+/** The dashboard's default GitHub: every read refuses, nothing reaches github.com. */
+export function offlineGitHub(): GitHub {
+  return {
+    fileAt: async (repository, path, ref) => {
+      throw new ForgeOffline(`reading ${repository}/${path} at ${ref}`);
+    },
+    get: async (path) => {
+      throw new ForgeOffline(`GET ${path}`);
+    },
+    list: async (path) => {
+      throw new ForgeOffline(`GET ${path}`);
     },
   };
 }

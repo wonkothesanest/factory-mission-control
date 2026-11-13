@@ -10,6 +10,18 @@ export const BASE_ENV_NAMES = [
   'LOCALAPPDATA',
 ];
 
+/**
+ * Where a child keeps its caches and temp files (local-factory port): without them a CLI and
+ * a bun it starts write theirs under the home directory (~/.cache, ~/.bun); with them, where
+ * bin/context.sh points them, inside this checkout's .tmp/. Paths only, never a credential.
+ */
+export const CACHE_NAMES = [
+  'TMPDIR',
+  'XDG_CACHE_HOME',
+  'BUN_INSTALL_CACHE_DIR',
+  'BUN_RUNTIME_TRANSPILER_CACHE_PATH',
+];
+
 export function pick(env: NodeJS.ProcessEnv, names: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const name of names) {

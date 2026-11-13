@@ -30,7 +30,7 @@ const connectionClosed = (error: unknown): error is Error =>
  * one. Every write is an upsert or a delete by key, so a replay after a COMMIT whose outcome was
  * lost records nothing twice.
  */
-async function writeDelivery(db: Db, write: Write, delivery: string): Promise<void> {
+export async function writeDelivery(db: Db, write: Write, delivery: string): Promise<void> {
   let statements = 0;
   let wrote = false;
   const attempt = () =>
@@ -60,7 +60,12 @@ async function writeDelivery(db: Db, write: Write, delivery: string): Promise<vo
   }
 }
 
-/** One route: GitHub's POST of a delivery. A delivery whose signature fails writes nothing. */
+/**
+ * One route: a signed POST of a GitHub-shaped delivery. A delivery whose signature fails writes
+ * nothing. local-factory port: this app is mounted nowhere (GitHub webhooks are disabled and
+ * the Neon Function that served it is gone); it is kept as the HTTP form of the forge seam
+ * (`function/forge-seam.ts`), should the local forge prefer to post signed deliveries.
+ */
 export function createWebhookApp({ secret, db, ...context }: WebhookOptions): Hono {
   if (!secret) throw new Error('GITHUB_WEBHOOK_SECRET must be set');
   const app = new Hono();

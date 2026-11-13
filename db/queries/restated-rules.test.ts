@@ -15,7 +15,7 @@ import {
 import { runsArgs } from '../../app/lib/runs';
 import { QUEUE_ENDING_STATE, QUEUE_REVIEW_STATE, REVIEW_OUTCOME_STATE } from '../../app/lib/states';
 import { ROUTE_OF_LABEL, WORK_ITEM_NUMBER } from '../../app/lib/work-item';
-import { FAILED_SIGNATURES_SQL } from '../../scripts/live/attention';
+import { FAILED_SIGNATURES_SQL } from '../../scripts/lib/failed-signatures';
 import { runMigrations } from '../../scripts/migrate';
 import { STOP_CORPUS } from '../run-stops-corpus';
 import { archonDb, migrationFiles } from '../test-db';

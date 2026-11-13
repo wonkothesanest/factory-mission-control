@@ -1,8 +1,8 @@
-import type { WebSocketLike } from '@neon/realtime/client';
 import { createRoot } from 'react-dom/client';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 import type { StepOrigin, StepRow } from '../../lib/step-detail';
 import { ALL_STEP_QUERIES } from '../../lib/step-queries';
+import type { SocketLike } from '../../live/client';
 import { FactoryProvider } from '../../live/FactoryProvider';
 import { LiveProvider } from '../../live/LiveProvider';
 import { FACTORY_MAP, mapOrigin, selectOnArrival } from '../../map/factory-map';
@@ -18,28 +18,24 @@ export interface Asked {
   args: string[];
 }
 
-const TEXT = 25;
-const INT4 = 23;
-const TEXT_ARRAY = 1009;
+type Listener = (event: { data?: unknown }) => void;
 
-function column(name: string, value: Cell) {
-  const type_oid = Array.isArray(value) ? TEXT_ARRAY : typeof value === 'number' ? INT4 : TEXT;
-  return { name, type_oid, typmod: -1, codec: 'pg_text' };
-}
-
-const cell = (value: Cell): string | null =>
-  value === null ? null : Array.isArray(value) ? `{${value.join(',')}}` : String(value);
-
-/** A socket that answers each subscribe with the rows of the seal it authorizes. */
-class Socket implements WebSocketLike {
+/**
+ * A live socket that answers each subscribe with `rowsOf(asked)`, once whatever `held` matches is
+ * released; `fail` ends a query's subscriptions with an error, as the server does when a query fails.
+ */
+class Socket implements SocketLike {
   readyState = 1;
-  private listeners = new Map<string, ((event: { data: unknown }) => void)[]>();
-  /** Each subscription's live id, by the capability that authorized it. */
-  readonly live = new Map<string, string>();
+  readonly asked: Asked[] = [];
+  private listeners = new Map<string, Listener[]>();
+  /** Each subscription's id, with what it asked for. */
+  private readonly ids = new Map<string, Asked>();
+  held: (asked: Asked) => boolean = () => false;
+  released: Promise<void> = Promise.resolve();
 
-  constructor(private rowsOf: (capability: string) => Rows) {}
+  constructor(private rowsOf: (asked: Asked) => Rows) {}
 
-  addEventListener(type: string, listener: (event: { data: unknown }) => void) {
+  addEventListener(type: string, listener: Listener) {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
   }
 
@@ -49,45 +45,31 @@ class Socket implements WebSocketLike {
   }
 
   send(data: string) {
-    const message = JSON.parse(data);
-    if (message.type !== 'subscribe') return;
-    const rows = this.rowsOf(message.authorization);
-    const live_id = message.request_id;
-    this.live.set(message.authorization, live_id);
-    queueMicrotask(() => {
-      const first = rows[0] ?? { value: null };
-      this.receive({
-        type: 'subscribed',
-        request_id: message.request_id,
-        live_id,
-        epoch: '1',
-        first_sequence: '1',
-        columns: Object.entries(first).map(([name, value]) => column(name, value)),
-      });
-      const version = { live_id, epoch: '1', baseline_sync_attempt: '1' };
-      this.receive({
-        type: 'baseline_sync_start',
-        ...version,
-        mvcc: { xmin: '1', xmax: '1', xip: [] },
-      });
-      if (rows.length > 0)
-        this.receive({
-          type: 'baseline_sync_batch',
-          ...version,
-          index: 0,
-          rows: rows.map((row, i) => ({
-            row_key: i.toString(16).padStart(64, '0'),
-            values: Object.values(row).map(cell),
-          })),
-        });
-      this.receive({ type: 'baseline_sync_end', ...version, batch_count: rows.length > 0 ? 1 : 0 });
-    });
+    const message = JSON.parse(data) as {
+      type: string;
+      id: string;
+      query: string;
+      args?: string[];
+    };
+    if (message.type !== 'subscribe') {
+      this.ids.delete(message.id);
+      return;
+    }
+    const asked = { query: message.query, args: message.args ?? [] };
+    this.asked.push(asked);
+    this.ids.set(message.id, asked);
+    const answer = () => {
+      if (!this.ids.has(message.id)) return;
+      this.receive({ type: 'rows', id: message.id, rows: this.rowsOf(asked) });
+    };
+    if (this.held(asked)) this.released.then(answer);
+    else queueMicrotask(answer);
   }
 
-  /** Ends the subscription `capability` authorized with an error it cannot recover from. */
-  fail(capability: string) {
-    const live_id = this.live.get(capability);
-    this.receive({ type: 'subscription_error', live_id, code: 'protocol_error', message: 'test' });
+  /** Ends every subscription to `query` with an error. */
+  fail(query: string) {
+    for (const [id, asked] of this.ids)
+      if (asked.query === query) this.receive({ type: 'error', id, error: 'test' });
   }
 
   close() {
@@ -138,40 +120,11 @@ async function until(done: () => boolean, what: string): Promise<void> {
  */
 function mount(url: string, steps: Record<string, StepRow[]>, state?: unknown) {
   performance.clearMarks();
-  const originalFetch = window.fetch;
-  const header = btoa(JSON.stringify({ alg: 'dir', enc: 'A256GCM', v: 1 })).replace(/=+$/, '');
-  const asked: Asked[] = [];
-  let held: (asked: Asked) => boolean = () => false;
-  let released = Promise.resolve();
-  window.fetch = Object.assign(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
-      const query = String(input).replace('/api/live/', '');
-      const { args = [] }: { args?: string[] } = JSON.parse(String(init?.body));
-      const n = asked.push({ query, args }) - 1;
-      if (held({ query, args })) await released;
-      return Response.json({
-        capability: `${header}..${n}.test.tag`,
-        queryFingerprint: n.toString(16).padStart(64, '0'),
-        expiresAt: Date.now() + 60_000,
-        rewind: null,
-      });
-    },
-    { preconnect: originalFetch.preconnect },
+  const socket = new Socket(({ query, args }) =>
+    query === 'step-detail' ? (steps[args[0]] ?? []).map((row) => ({ ...row })) : [],
   );
-  const rowsOf = (capability: string): Rows => {
-    const { query, args } = asked[Number(capability.split('.')[2])];
-    return query === 'step-detail' ? (steps[args[0]] ?? []).map((row) => ({ ...row })) : [];
-  };
-  const socket = new Socket(rowsOf);
-  window.__MC_LIVE__ = {
-    url: 'wss://test/',
-    home: 'wss://test/',
-    factories: ['factory-a'],
-    rewind: null,
-    protocol: 'neon.realtime.v1',
-    early: [JSON.stringify({ type: 'ready' })],
-    socket: socket as unknown as WebSocket,
-  };
+  const asked = socket.asked;
+  window.__MC_LIVE__ = { factories: ['factory-a'], socket };
   const at = new URL(url, 'http://test');
   const router = createMemoryRouter(
     [
@@ -210,24 +163,22 @@ function mount(url: string, steps: Record<string, StepRow[]>, state?: unknown) {
     state: () => router.state.location.state,
     location: () => `${router.state.location.pathname}${router.state.location.search}`,
     fail(query: string) {
-      for (const capability of socket.live.keys())
-        if (asked[Number(capability.split('.')[2])].query === query) socket.fail(capability);
+      socket.fail(query);
     },
     hold(next: (asked: Asked) => boolean): () => void {
       let open = () => {};
-      released = new Promise((resolve) => {
+      socket.released = new Promise((resolve) => {
         open = resolve;
       });
-      held = next;
+      socket.held = next;
       return () => {
-        held = () => false;
+        socket.held = () => false;
         open();
       };
     },
     unmount() {
       root.unmount();
       container.remove();
-      window.fetch = originalFetch;
       delete window.__MC_LIVE__;
     },
   };

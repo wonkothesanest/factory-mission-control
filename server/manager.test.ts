@@ -10,14 +10,18 @@ import { LIVE_QUERIES_DIR, loadLiveQueries } from './live';
 import {
   type AgentRunner,
   type AttentionTally,
+  AUTO_BRIEFING_OFF,
   attentionLine,
   briefingFault,
   briefingQuestion,
   CREDENTIAL_NAMES,
   capBriefingProse,
+  cliEnv,
   createManager,
   failureCausesBlock,
+  MANAGER_HOME_DIR,
   type Manager,
+  managerLogin,
   managerSettings,
 } from './manager';
 import { DAY_CAUSES_CAP, DAY_MERGED_CAP, type DayDigest, readDayDigest } from './manager-day';
@@ -557,7 +561,7 @@ describe('the briefing', () => {
       events(
         await app.request('/api/manager/briefing', {
           method: 'POST',
-          body: JSON.stringify({ factory: FACTORY, refresh }),
+          body: JSON.stringify({ factory: FACTORY, refresh, requested: true }),
         }),
       );
     const first = await ask();
@@ -574,7 +578,7 @@ describe('the briefing', () => {
     events(
       await createApp({ buildId: 't', distDir: '.', manager }).request('/api/manager/briefing', {
         method: 'POST',
-        body: JSON.stringify({ factory: FACTORY, refresh }),
+        body: JSON.stringify({ factory: FACTORY, refresh, requested: true }),
       }),
     );
 
@@ -620,7 +624,7 @@ describe('the briefing', () => {
         events(
           await createApp({ buildId: 't', distDir: '.', manager }).request(
             '/api/manager/briefing',
-            { method: 'POST', body: JSON.stringify({ factory: F }) },
+            { method: 'POST', body: JSON.stringify({ factory: F, requested: true }) },
           ),
         );
       const line = `No run is paused on a question. ${count} things need you: 1 to decide, 2 to unstick, 2 to fix (3 failures in 2 causes).`;
@@ -707,7 +711,7 @@ describe('the briefing', () => {
         events(
           await createApp({ buildId: 't', distDir: '.', manager }).request(
             '/api/manager/briefing',
-            { method: 'POST', body: JSON.stringify({ factory: F, refresh }) },
+            { method: 'POST', body: JSON.stringify({ factory: F, refresh, requested: true }) },
           ),
         );
       const line = 'No question is waiting. 1 thing needs you: 1 to unstick.';
@@ -797,7 +801,7 @@ describe('the briefing', () => {
         events(
           await createApp({ buildId: 't', distDir: '.', manager }).request(
             '/api/manager/briefing',
-            { method: 'POST', body: JSON.stringify({ factory: F }) },
+            { method: 'POST', body: JSON.stringify({ factory: F, requested: true }) },
           ),
         );
       const first = ask();
@@ -834,7 +838,7 @@ describe('the briefing', () => {
       manager: managerOf(played),
     }).request('/api/manager/briefing', {
       method: 'POST',
-      body: JSON.stringify({ factory: FACTORY }),
+      body: JSON.stringify({ factory: FACTORY, requested: true }),
     });
     const reader = (response.body as ReadableStream<Uint8Array>).getReader();
     const first = reader.read();
@@ -1001,7 +1005,10 @@ describe('a lap that started on an earlier day and failed today', () => {
       await (await chat(manager)).text();
       const briefed = await createApp({ buildId: 't', distDir: '.', manager }).request(
         '/api/manager/briefing',
-        { method: 'POST', body: JSON.stringify({ factory: FACTORY, refresh: true }) },
+        {
+          method: 'POST',
+          body: JSON.stringify({ factory: FACTORY, refresh: true, requested: true }),
+        },
       );
       await briefed.text();
       expect(played.options).toHaveLength(2);
@@ -1091,7 +1098,7 @@ describe('a busy day', () => {
       });
       const briefed = await createApp({ buildId: 't', distDir: '.', manager }).request(
         '/api/manager/briefing',
-        { method: 'POST', body: JSON.stringify({ factory: F, refresh: true }) },
+        { method: 'POST', body: JSON.stringify({ factory: F, refresh: true, requested: true }) },
       );
       const shown = (await events(briefed))
         .flatMap((e) => (e.type === 'text' ? [e.text] : []))
@@ -1143,7 +1150,7 @@ describe('a busy day', () => {
       const ask = async (refresh: boolean) => {
         const out = await createApp({ buildId: 't', distDir: '.', manager }).request(
           '/api/manager/briefing',
-          { method: 'POST', body: JSON.stringify({ factory: F, refresh }) },
+          { method: 'POST', body: JSON.stringify({ factory: F, refresh, requested: true }) },
         );
         return (await events(out)).flatMap((e) => (e.type === 'text' ? [e.text] : [])).join('');
       };
@@ -1218,7 +1225,7 @@ describe('a briefing whose day read fails', () => {
     const ask = async () => {
       const res = await createApp({ buildId: 't', distDir: '.', manager }).request(
         '/api/manager/briefing',
-        { method: 'POST', body: JSON.stringify({ factory: FACTORY }) },
+        { method: 'POST', body: JSON.stringify({ factory: FACTORY, requested: true }) },
       );
       return events(res);
     };
@@ -1345,7 +1352,10 @@ describe('a briefing whose count cannot be read', () => {
       const manager = { ...managerOf(played), db: failing };
       const res = await createApp({ buildId: 't', distDir: '.', manager }).request(
         '/api/manager/briefing',
-        { method: 'POST', body: JSON.stringify({ factory: FACTORY, refresh: true }) },
+        {
+          method: 'POST',
+          body: JSON.stringify({ factory: FACTORY, refresh: true, requested: true }),
+        },
       );
       const got = await events(res);
       expect(got[0]).toMatchObject({ type: 'text', text: 'fine' });
@@ -1376,7 +1386,7 @@ describe('a briefing whose count cannot be read', () => {
       const ask = async () => {
         const res = await createApp({ buildId: 't', distDir: '.', manager }).request(
           '/api/manager/briefing',
-          { method: 'POST', body: JSON.stringify({ factory: FACTORY }) },
+          { method: 'POST', body: JSON.stringify({ factory: FACTORY, requested: true }) },
         );
         return (await events(res)).at(-1);
       };
@@ -1404,7 +1414,7 @@ describe('a briefing whose count cannot be read', () => {
           manager: { ...manager, db },
         }).request('/api/manager/briefing', {
           method: 'POST',
-          body: JSON.stringify({ factory: FACTORY }),
+          body: JSON.stringify({ factory: FACTORY, requested: true }),
         });
         return (await events(res)).at(-1);
       };
@@ -1456,7 +1466,130 @@ describe('the settings', () => {
       effort: 'low',
       messageCapUsd: 0.5,
       dayCapUsd: 5,
+      autoBriefing: false,
     });
+    expect(managerSettings({ MC_MANAGER_AUTO_BRIEFING: '1' }).autoBriefing).toBe(true);
+    expect(managerSettings({ MC_MANAGER_AUTO_BRIEFING: '0' }).autoBriefing).toBe(false);
+    expect(() => managerSettings({ MC_MANAGER_AUTO_BRIEFING: 'yes' })).toThrow(
+      'MC_MANAGER_AUTO_BRIEFING',
+    );
+  });
+});
+
+describe('automatic briefings (local-factory port: off unless the operator turns them on)', () => {
+  const ask = (manager: Manager, body: object) =>
+    createApp({ buildId: 't', distDir: '.', manager }).request('/api/manager/briefing', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+
+  test('an unrequested briefing is refused and starts no Claude run', async () => {
+    const played = answering();
+    const refused = await ask(managerOf(played), { factory: FACTORY });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: AUTO_BRIEFING_OFF, auto_briefing: false });
+    expect(played.prompts).toHaveLength(0);
+    const alsoRefused = await ask(managerOf(played), { factory: FACTORY, requested: 'yes' });
+    expect(alsoRefused.status).toBe(409);
+    expect(played.prompts).toHaveLength(0);
+  });
+
+  test('a briefing a person asked for runs', async () => {
+    const played = answering();
+    const asked = await ask(managerOf(played), { factory: FACTORY, requested: true });
+    expect((await events(asked)).at(-1)).toMatchObject({ type: 'done', cached: false });
+    expect(played.prompts).toHaveLength(1);
+  });
+
+  test('with MC_MANAGER_AUTO_BRIEFING=1 the panel may brief by itself', async () => {
+    const played = answering();
+    const manager = managerOf(played, { MC_MANAGER_AUTO_BRIEFING: '1' });
+    expect((await events(await ask(manager, { factory: FACTORY }))).at(-1)).toMatchObject({
+      type: 'done',
+    });
+    expect(played.prompts).toHaveLength(1);
+  });
+
+  test('GET /api/manager/settings says whether the panel may brief by itself', async () => {
+    const settingsOf = async (manager?: Manager) =>
+      (
+        await createApp({ buildId: 't', distDir: '.', manager }).request('/api/manager/settings')
+      ).json();
+    expect(await settingsOf(managerOf(answering()))).toEqual({
+      available: true,
+      auto_briefing: false,
+      login: 'home',
+    });
+    expect(
+      await settingsOf(managerOf(answering(), { MC_MANAGER_AUTO_BRIEFING: '1' })),
+    ).toMatchObject({ auto_briefing: true });
+    expect(await settingsOf()).toMatchObject({
+      available: false,
+      auto_briefing: false,
+      login: 'off',
+    });
+  });
+});
+
+describe('the Manager CLI login (local-factory port)', () => {
+  const ROOT = '/srv/mc';
+  test('defaults to the operator login without a credential, and to an isolated home with one', () => {
+    expect(managerLogin({}, ROOT)).toEqual({ mode: 'home' });
+    expect(managerLogin({ CLAUDE_CODE_OAUTH_TOKEN: 'x' }, ROOT)).toEqual({
+      mode: 'isolated',
+      env: {
+        HOME: `${ROOT}/${MANAGER_HOME_DIR}`,
+        CLAUDE_CONFIG_DIR: `${ROOT}/${MANAGER_HOME_DIR}/.claude`,
+      },
+    });
+    expect(managerLogin({ MC_MANAGER_LOGIN: 'off' }, ROOT).mode).toBe('off');
+    expect(managerLogin({ MC_MANAGER_LOGIN: 'home', CLAUDE_CODE_OAUTH_TOKEN: 'x' }, ROOT)).toEqual({
+      mode: 'home',
+    });
+    const isolatedWithout = managerLogin({ MC_MANAGER_LOGIN: 'isolated' }, ROOT);
+    expect(isolatedWithout.mode).toBe('off');
+    expect(() => managerLogin({ MC_MANAGER_LOGIN: 'cloud' }, ROOT)).toThrow('MC_MANAGER_LOGIN');
+  });
+
+  test('an off Manager answers 503 with why, and starts nothing', async () => {
+    const played = answering();
+    const manager = {
+      ...managerOf(played),
+      login: managerLogin({ MC_MANAGER_LOGIN: 'off' }, ROOT),
+    };
+    const app = createApp({ buildId: 't', distDir: '.', manager });
+    const res = await app.request('/api/manager/briefing', {
+      method: 'POST',
+      body: JSON.stringify({ factory: FACTORY, requested: true }),
+    });
+    expect(res.status).toBe(503);
+    expect(String((await res.json()).error)).toContain('MC_MANAGER_LOGIN=off');
+    expect(played.prompts).toHaveLength(0);
+  });
+
+  test('the CLI gets the cache and temp paths, and the isolated home over HOME', () => {
+    const base = {
+      PATH: '/bin',
+      HOME: '/home/op',
+      TMPDIR: '/srv/mc/.tmp/run',
+      XDG_CACHE_HOME: '/srv/mc/.tmp/cache',
+      BUN_INSTALL_CACHE_DIR: '/srv/mc/.tmp/cache/bun-install',
+      MC_DATABASE_URL: 'postgres://not-passed',
+    };
+    const home = cliEnv({ mode: 'home' }, base);
+    expect(home).toMatchObject({
+      HOME: '/home/op',
+      TMPDIR: base.TMPDIR,
+      XDG_CACHE_HOME: base.XDG_CACHE_HOME,
+      BUN_INSTALL_CACHE_DIR: base.BUN_INSTALL_CACHE_DIR,
+    });
+    expect(home.MC_DATABASE_URL).toBeUndefined();
+    const isolated = cliEnv(managerLogin({ CLAUDE_CODE_OAUTH_TOKEN: 't' }, ROOT), {
+      ...base,
+      CLAUDE_CODE_OAUTH_TOKEN: 't',
+    });
+    expect(isolated.HOME).toBe(`${ROOT}/${MANAGER_HOME_DIR}`);
+    expect(isolated.CLAUDE_CONFIG_DIR).toBe(`${ROOT}/${MANAGER_HOME_DIR}/.claude`);
   });
 });
 

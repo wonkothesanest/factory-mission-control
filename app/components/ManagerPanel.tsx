@@ -20,6 +20,8 @@ import { Button, buttonClass } from './ui/Button';
 import { StateDot } from './ui/StateDot';
 
 const BRIEFING_WAIT = "Writing today's briefing.";
+const BRIEFING_OFFER =
+  "Today's briefing is written only when you ask: each one is a Claude run on this machine's login.";
 const NO_FACTORY = 'This address names no factory, so the Manager has nothing to look at.';
 const LINK = 'text-[color:var(--v3-you-2)] hover:underline';
 
@@ -257,7 +259,7 @@ export function ManagerPanelBody({
 }: {
   phone: boolean;
   onClose: () => void;
-  chat: Pick<ManagerChat, 'messages' | 'busy'>;
+  chat: Pick<ManagerChat, 'messages' | 'busy'> & Partial<Pick<ManagerChat, 'offered' | 'brief'>>;
   place: ManagerPlace;
   factory: string | undefined;
   enabled: boolean;
@@ -323,6 +325,16 @@ export function ManagerPanelBody({
                 {place.chip}
               </span>
             </div>
+            {chat.offered ? (
+              <div data-briefing-offer className="flex flex-col items-start gap-2">
+                <p className="m-0 text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg-3)]">
+                  {BRIEFING_OFFER}
+                </p>
+                <Button variant="secondary" disabled={chat.busy} onClick={() => chat.brief?.()}>
+                  Write today's briefing
+                </Button>
+              </div>
+            ) : null}
             {chat.messages.map((message, i) => (
               <Message
                 // biome-ignore lint/suspicious/noArrayIndexKey: messages are only ever appended

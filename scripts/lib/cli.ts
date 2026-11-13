@@ -1,83 +1,67 @@
 import { resolve } from 'node:path';
-import { createGitHub, type GetFetch, type GitHub } from '../../function/github';
+import { type GetFetch, type GitHub, offlineFetch, offlineGitHub } from '../../function/github';
 import { type Env, loadCheckEnv } from '../../server/check-env';
-import { defaultLeaseDir, refreshLease } from '../../server/check-lease';
 import { askArchon, type RunStatus } from './archon-run';
 import { type OpenDb, openDb } from './db';
-import { RefusedBranch, requireCheckBranch } from './guard';
-import { createNeonApi, type NeonApi, type Sleep } from './neon';
-import { resolveBranchName } from './target';
+import { isCheckDatabase, RefusedDatabase, requireCheckDatabase } from './guard';
+import { databaseNameOf } from './target';
 
 export const REPO_ROOT = resolve(import.meta.dir, '..', '..');
+
+export type Sleep = (ms: number) => Promise<void>;
 
 /** Everything a command touches outside itself, so tests can record it. */
 export type Deps = {
   env: Env;
   repoRoot: string;
-  /** The directory every checkout on this machine shares for check-branch leases (`fixture:drop --help`). */
-  leaseDir: string;
-  neon: () => NeonApi;
+  /**
+   * The database a connection string names (local-factory port: a local database stands
+   * where a Neon branch stood, and is told apart by its name, `check-*` or not).
+   */
+  databaseName: (url: string) => Promise<string>;
+  /**
+   * The forge seam (local-factory port): GitHub-shaped reads of issues, pull requests and
+   * files. Offline by default, so nothing reaches github.com; the local forge plugs in here.
+   */
   github: () => GitHub;
   openDb: OpenDb;
-  /** GET-only fetch for commands that read raw GitHub contents (`arch:parse`). */
+  /** GET-only fetch for commands that read raw repository contents (`arch:parse`); offline by default. */
   fetch: GetFetch;
   now: () => Date;
   sleep: Sleep;
   out: (line: string) => void;
   err: (line: string) => void;
-  /** `migrate:main`, `arch:parse:main` and `rewind:create` on main ask; true when the owner, at a terminal, confirmed the project. */
-  confirmOwner: (projectId: string) => boolean;
-  /**
-   * neonctl from this repository's node_modules, run by Bun itself: Bun refuses to pass a
-   * connection string's `&` to the Windows `.cmd` shim.
-   */
-  neonctl: (args: string[]) => Promise<NeonctlResult>;
-  /** Asks Archon, read-only, whether run `run` is still active (`fixture:drop`). */
+  /** The `:main` commands ask; true when the operator confirmed the live database by name. */
+  confirmOwner: (database: string) => boolean;
+  /** Asks Archon, read-only, whether run `run` is still active. */
   runStatus: (run: string) => Promise<RunStatus>;
 };
 
-export type NeonctlResult = { code: number; stdout: string; stderr: string };
-
 export type Main = (argv: string[], deps: Deps) => Promise<number>;
 
-function neonFromEnv(env: Env): NeonApi {
-  const apiKey = env.NEON_API_KEY;
-  const projectId = env.NEON_PROJECT_ID;
-  if (!apiKey || !projectId) throw new Error('NEON_API_KEY and NEON_PROJECT_ID must be set');
-  return createNeonApi({ apiKey, projectId });
-}
-
-async function runNeonctl(args: string[]): Promise<NeonctlResult> {
-  const cli = Bun.resolveSync('neonctl/bin/cli.js', REPO_ROOT);
-  const child = Bun.spawn([process.execPath, cli, ...args], { stdout: 'pipe', stderr: 'pipe' });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { code, stdout, stderr };
-}
-
-function confirmOwnerAtTerminal(projectId: string): boolean {
+/**
+ * The operator confirms a `:main` write by typing the database's name at a terminal, or, for an
+ * unattended start (`start.sh`), by setting MC_OWNER_CONFIRM to that name.
+ */
+function confirmOwnerAtTerminal(database: string): boolean {
+  if (Bun.env.MC_OWNER_CONFIRM === database) return true;
   if (!process.stdin.isTTY) return false;
-  return prompt(`Type the Neon project id (${projectId}) to write to main:`) === projectId;
+  return prompt(`Type the database name (${database}) to write to it:`) === database;
 }
 
 export function defaultDeps(): Deps {
   return {
     env: Bun.env,
     repoRoot: REPO_ROOT,
-    leaseDir: defaultLeaseDir(),
-    neon: () => neonFromEnv(Bun.env),
-    github: () => createGitHub(fetch, Bun.env.GITHUB_TOKEN),
+    databaseName: async (url) => databaseNameOf(url),
+    github: () => offlineGitHub(),
     openDb,
-    fetch: (url, init) => fetch(url, init),
+    fetch: offlineFetch,
     now: () => new Date(),
     sleep: (ms) => Bun.sleep(ms),
     out: (line) => console.log(line),
     err: (line) => console.error(line),
     confirmOwner: confirmOwnerAtTerminal,
-    neonctl: runNeonctl,
     runStatus: (run) => askArchon(Bun.env, REPO_ROOT, run),
   };
 }
@@ -119,27 +103,22 @@ export async function failing(deps: Deps, work: () => Promise<void>): Promise<nu
   }
 }
 
-/** Refreshes this checkout's lease on check branch `name`, warning when an existing one cannot be moved. */
-export function refreshCheckLease(deps: Deps, name: string): void {
-  if (!refreshLease(deps.leaseDir, name, deps.now())) {
-    deps.err(`could not refresh the lease for ${name} in ${deps.leaseDir}`);
-  }
-}
-
 /**
- * `MC_DATABASE_URL` once the Neon API says it points at a `check-*` branch, or, for the owner's
- * `:main` commands, at `main`. Nothing may connect to the URL before this returns.
+ * `MC_DATABASE_URL` once its database is a `check-*` one (a check's scratch database), or, for
+ * the operator's `:main` commands, the live dashboard database (any name but `check-*`). Nothing
+ * may connect to the URL before this returns.
  */
 export async function guardedDatabaseUrl(deps: Deps, target: 'check' | 'main'): Promise<string> {
   loadCheckEnv(deps.repoRoot, deps.env);
   const url = deps.env.MC_DATABASE_URL;
   if (!url) throw new Error('MC_DATABASE_URL is not set: run `bun run fixture:branch` first');
-  const name = await resolveBranchName(url, deps.neon());
+  const name = await deps.databaseName(url);
   if (target === 'check') {
-    requireCheckBranch(name);
-    refreshCheckLease(deps, name);
+    requireCheckDatabase(name);
     return url;
   }
-  if (name !== 'main') throw new RefusedBranch(name, 'a :main command only writes main');
+  if (isCheckDatabase(name)) {
+    throw new RefusedDatabase(name, 'a :main command writes the live database, not a check one');
+  }
   return url;
 }

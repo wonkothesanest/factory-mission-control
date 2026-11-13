@@ -138,7 +138,13 @@ export async function launchBrowser(
   ];
   // GitHub's Ubuntu runners restrict the unprivileged user namespaces Chrome's sandbox needs.
   if (process.platform === 'linux' && Bun.env.CI) args.unshift('--no-sandbox');
-  const proc = spawn(findBrowser(), args, { stdio: 'ignore' });
+  // Chrome's singleton socket lives under $TMPDIR and a Unix socket path holds at most 107 bytes:
+  // under a deep TMPDIR it gets the same directory named relatively from inside it.
+  const deepTmp = process.platform === 'linux' && tmpdir().length > 60;
+  const proc = spawn(findBrowser(), args, {
+    stdio: 'ignore',
+    ...(deepTmp && { cwd: tmpdir(), env: { ...process.env, TMPDIR: '.' } }),
+  });
   const exited = new Promise((done) => proc.once('exit', done));
   const close = async () => {
     if (proc.exitCode === null) {

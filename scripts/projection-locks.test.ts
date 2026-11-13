@@ -54,8 +54,9 @@ test('each case leaves the projection errors it declares when its held tables fa
     `INSERT INTO mc.factories (name, repository, codebase, console) VALUES ('f', 'o/r', 'cb', 'c')`,
   );
   await db.query(`CREATE ROLE archon_writer`);
-  await db.query(`GRANT USAGE ON SCHEMA mc TO archon_writer;
-    GRANT ALL ON ALL TABLES IN SCHEMA public, mc TO archon_writer;
+  // Archon's role writes through the guard into the shadow tables (mc_guard), as it writes mc.
+  await db.query(`GRANT USAGE ON SCHEMA mc, mc_guard TO archon_writer;
+    GRANT ALL ON ALL TABLES IN SCHEMA public, mc, mc_guard TO archon_writer;
     GRANT ALL ON ALL SEQUENCES IN SCHEMA public, mc TO archon_writer`);
   const [run] = await db.query(
     `INSERT INTO remote_agent_workflow_runs (workflow_name, status, user_message, metadata)

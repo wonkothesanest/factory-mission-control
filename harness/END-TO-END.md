@@ -1,8 +1,8 @@
 # End-to-end journeys
 
 What a user does with Factory Mission Control today, in plain English. Each journey runs against
-the app served from a check branch loaded with the seed (`bun run fixture:branch`, then
-`bun run serve -- --port <8850-8864>`, opened at `http://localhost:<port>`).
+the app served from a check database loaded with the seed (`bun run fixture:branch`, then
+`bun run serve -- --port <3092-3099>`, opened at `http://localhost:<port>`).
 
 1. **See the factory.** Open the Factory place (`/f/<factory>/map`). The architecture map shows the loop's steps from
    pick to release, the manager above them and the inputs and outputs around them. Open check-app:

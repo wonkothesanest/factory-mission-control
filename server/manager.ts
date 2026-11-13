@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -25,7 +25,7 @@ import { workItemHref } from '../app/lib/work-item';
 import { type Db, openDb } from '../scripts/lib/db';
 import { OPEN_QUESTION_SQL, openQuestionOf, RESUMABLE_RUN_SQL, RESUME_FROM_SQL } from './actions';
 import type { Env } from './check-env';
-import { BASE_ENV_NAMES, pick } from './child-env';
+import { BASE_ENV_NAMES, CACHE_NAMES, pick } from './child-env';
 import { readFactoryNames } from './factories';
 import { LIVE_QUERIES_DIR, loadLiveQueries } from './live';
 import { type DayDigest, readDayDigest } from './manager-day';
@@ -65,6 +65,13 @@ export interface ManagerSettings {
   effort: EffortLevel;
   messageCapUsd: number;
   dayCapUsd: number;
+  /**
+   * local-factory port: whether opening the panel writes the day's briefing by itself
+   * (MC_MANAGER_AUTO_BRIEFING=1). Off by default, so opening a page never starts a Claude run on
+   * the operator's login: the panel offers a button, and the briefing route refuses a briefing
+   * nobody asked for (`requested: true`).
+   */
+  autoBriefing: boolean;
 }
 
 function positive(env: Env, name: string, fallback: number): number {
@@ -89,7 +96,16 @@ export function managerSettings(env: Env): ManagerSettings {
     effort,
     messageCapUsd: positive(env, 'MC_MANAGER_MESSAGE_USD', 0.5),
     dayCapUsd: positive(env, 'MC_MANAGER_DAY_USD', 5),
+    autoBriefing: flag(env, 'MC_MANAGER_AUTO_BRIEFING'),
   };
+}
+
+/** An on/off setting: unset, '' or '0' is off, '1' is on; anything else is a mistake. */
+function flag(env: Env, name: string): boolean {
+  const raw = env[name] ?? '';
+  if (raw === '' || raw === '0') return false;
+  if (raw === '1') return true;
+  throw new Error(`${name} must be 1 (on) or 0 (off)`);
 }
 
 /** The SDK's `query`, narrowed to what the Manager uses, so a test can play the model. */
@@ -106,12 +122,56 @@ interface CachedBriefing {
   basis: string | null;
 }
 
+/**
+ * How the Manager's Claude CLI logs in, and where it keeps its state (local-factory port:
+ * nothing the dashboard runs may write under $HOME, except the Claude CLI's own login state when a
+ * person asks the Manager something). Every CLI run writes under its home: its config
+ * (.claude.json and backups of it) and its session, plugin, skill, policy-limit and
+ * remote-settings caches (docs/LOCAL-PORT.md, "The Manager", lists them).
+ * - `home`: the operator's own Claude login (subscription) under $HOME; the CLI writes there. The
+ *   default when the server's environment holds no credential. The CLI only ever starts for a
+ *   person's question or a briefing they asked for (ManagerSettings.autoBriefing is off).
+ * - `isolated`: the server's environment holds a credential (CLAUDE_CODE_OAUTH_TOKEN, e.g. from
+ *   `claude setup-token`, or ANTHROPIC_API_KEY); the CLI's HOME and CLAUDE_CONFIG_DIR are
+ *   MANAGER_HOME_DIR inside the checkout, so it writes nothing under $HOME. The default with a
+ *   credential.
+ * - `off` (MC_MANAGER_LOGIN=off): no CLI ever starts; the Manager routes answer 503 with `reason`,
+ *   and the panel says so.
+ */
+export type ManagerLogin =
+  | { mode: 'isolated'; env: Record<string, string> }
+  | { mode: 'home' }
+  | { mode: 'off'; reason: string };
+
+/** The isolated CLI's home, relative to the checkout (under .tmp/, which git ignores). */
+export const MANAGER_HOME_DIR = '.tmp/manager-home';
+
+export const MANAGER_OFF_REASON =
+  'it is off on this server (MC_MANAGER_LOGIN=off; docs/LOCAL-PORT.md, "The Manager")';
+export const MANAGER_NO_CREDENTIAL =
+  'MC_MANAGER_LOGIN=isolated needs CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY on the server (docs/LOCAL-PORT.md, "The Manager")';
+
+/**
+ * Reads MC_MANAGER_LOGIN: `home`, `isolated` or `off`. Unset, it is `isolated` when the server's
+ * environment holds a credential and `home` otherwise.
+ */
+export function managerLogin(env: Env, repoRoot: string): ManagerLogin {
+  const choice = env.MC_MANAGER_LOGIN || (hasCredential(env) ? 'isolated' : 'home');
+  if (choice === 'off') return { mode: 'off', reason: MANAGER_OFF_REASON };
+  if (choice === 'home') return { mode: 'home' };
+  if (choice !== 'isolated') throw new Error('MC_MANAGER_LOGIN must be home, isolated or off');
+  if (!hasCredential(env)) return { mode: 'off', reason: MANAGER_NO_CREDENTIAL };
+  const home = join(repoRoot, MANAGER_HOME_DIR);
+  return { mode: 'isolated', env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, '.claude') } };
+}
+
 /** The Manager's state lives in this process: a restart resets the day's spend and the briefings. */
 export interface Manager {
   db: Db;
   databaseUrl: string;
   factories: string[];
   settings: ManagerSettings;
+  login: ManagerLogin;
   run: AgentRunner;
   now: () => Date;
   spend: { day: string; usd: number };
@@ -120,13 +180,15 @@ export interface Manager {
   schema?: Promise<string>;
 }
 
+/** Without `login`, the CLI inherits the server's home (`home`): what a test's played model sees. */
 export function createManager(
   parts: Pick<Manager, 'db' | 'databaseUrl' | 'factories' | 'settings'> &
-    Partial<Pick<Manager, 'run' | 'now'>>,
+    Partial<Pick<Manager, 'run' | 'now' | 'login'>>,
 ): Manager {
   const now = parts.now ?? (() => new Date());
   return {
     ...parts,
+    login: parts.login ?? { mode: 'home' },
     run: parts.run ?? query,
     now,
     spend: { day: dayOf(now()), usd: 0 },
@@ -145,6 +207,7 @@ export function managerFromEnv(env: Env, repoRoot: string): Manager | undefined 
     databaseUrl,
     factories: readFactoryNames(env, repoRoot),
     settings,
+    login: managerLogin(env, repoRoot),
   });
 }
 
@@ -239,11 +302,17 @@ export function parseChat(body: unknown, factories: string[]): ChatRequest | str
 /** Every one must also be in `SECRETS` of `app/bundle.test.ts`, which scans the browser bundle for it, and the `unavailable` notice names them (its test checks each). */
 export const CREDENTIAL_NAMES = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] as const;
 
-const PASSED_TO_CLI = [...BASE_ENV_NAMES, ...CREDENTIAL_NAMES];
+const PASSED_TO_CLI = [...BASE_ENV_NAMES, ...CACHE_NAMES, ...CREDENTIAL_NAMES];
 
 /** The machine's own Claude login is not in the environment, so this can only say "none set". */
-function hasCredential(env: NodeJS.ProcessEnv): boolean {
+function hasCredential(env: Env): boolean {
   return CREDENTIAL_NAMES.some((name) => Boolean(env[name]));
+}
+
+/** The CLI's environment: the allowlist, with the isolated login's HOME and config dir over it. */
+export function cliEnv(login: ManagerLogin, env: Env = process.env): Record<string, string> {
+  const passed = pick(env, PASSED_TO_CLI);
+  return login.mode === 'isolated' ? { ...passed, ...login.env } : passed;
 }
 
 const canUse =
@@ -284,7 +353,7 @@ export function buildOptions(
         command: process.execPath,
         args: [join(import.meta.dir, 'manager-tools.ts')],
         env: {
-          ...pick(env, ['PATH', 'SYSTEMROOT', 'TEMP', 'TMP']),
+          ...pick(env, ['PATH', 'SYSTEMROOT', 'TEMP', 'TMP', ...CACHE_NAMES]),
           MC_DATABASE_URL: manager.databaseUrl,
           MC_MANAGER_FACTORY: request.factory,
           ...(extra.briefing ? { [BRIEFING_ENV]: '1' } : {}),
@@ -301,7 +370,7 @@ export function buildOptions(
     maxTurns: 12,
     maxBudgetUsd: extra.maxBudgetUsd,
     abortController: extra.abortController,
-    env: pick(env, PASSED_TO_CLI),
+    env: cliEnv(manager.login, env),
   };
 }
 
@@ -387,9 +456,9 @@ const NOTICES: Record<NoticeKind, (m: Manager) => string> = {
     `Today's Manager budget of ${usd(m.settings.dayCapUsd)} is spent. It resets at midnight.`,
   'message-cap': (m: Manager) =>
     `This answer stopped at the ${usd(m.settings.messageCapUsd)} limit for one message. Ask a narrower question.`,
-  unavailable: () =>
+  unavailable: (m: Manager) =>
     'The Manager could not answer right now. The server log has the details.' +
-    (hasCredential(process.env)
+    (m.login.mode === 'isolated' || hasCredential(process.env)
       ? ''
       : ' Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY is set on the server: set CLAUDE_CODE_OAUTH_TOKEN, or log in to Claude on the machine that runs it.'),
   unstructured: () =>
@@ -588,6 +657,11 @@ async function produce(
   let resulted = false;
   let stop: 'success' | 'budget' | 'error' = 'error';
   try {
+    if (manager.login.mode === 'off')
+      throw new Error(`the Manager is off: ${manager.login.reason}`);
+    if (manager.login.mode === 'isolated') {
+      mkdirSync(manager.login.env.CLAUDE_CONFIG_DIR ?? '', { recursive: true, mode: 0o700 });
+    }
     cwd = mkdtempSync(join(tmpdir(), 'mc-manager-'));
     const prompt = renderConversation(request.messages);
     const system = systemPrompt(manager, request, await describeSchema(manager), briefing);
@@ -1038,11 +1112,21 @@ function keepOpen(c: Context): void {
   (c.env as Server<unknown> | undefined)?.timeout(c.req.raw, 0);
 }
 
-const NOT_CONFIGURED = { error: 'the manager is not configured' };
+const NOT_CONFIGURED = { error: 'it needs a database connection (MC_DATABASE_URL)' };
+
+export const AUTO_BRIEFING_OFF =
+  "automatic briefings are off on this server (MC_MANAGER_AUTO_BRIEFING): ask for one with the panel's button";
+
+/** Why the Manager cannot run here (no database, or no login of its own), or null when it can. */
+function unavailableReason(manager: Manager | undefined): { error: string } | null {
+  if (!manager) return NOT_CONFIGURED;
+  return manager.login.mode === 'off' ? { error: manager.login.reason } : null;
+}
 
 export function managerRoutes(app: Hono, manager: Manager | undefined): void {
   app.post('/api/manager/chat', async (c) => {
-    if (!manager) return c.json(NOT_CONFIGURED, 503);
+    const off = unavailableReason(manager);
+    if (off || !manager) return c.json(off ?? NOT_CONFIGURED, 503);
     const request = parseChat(await c.req.json().catch(() => undefined), manager.factories);
     if (typeof request === 'string') return c.json({ error: request }, 400);
     keepOpen(c);
@@ -1050,14 +1134,32 @@ export function managerRoutes(app: Hono, manager: Manager | undefined): void {
   });
 
   app.post('/api/manager/briefing', async (c) => {
-    if (!manager) return c.json(NOT_CONFIGURED, 503);
+    const off = unavailableReason(manager);
+    if (off || !manager) return c.json(off ?? NOT_CONFIGURED, 503);
     const body = await c.req.json().catch(() => undefined);
     const factory = isRecord(body) ? body.factory : undefined;
     if (typeof factory !== 'string' || !manager.factories.includes(factory)) {
       return c.json({ error: 'unknown factory' }, 400);
     }
+    // local-factory port: a briefing is a Claude run on the operator's login, so it starts
+    // only when a person asked for it, unless the operator turned automatic briefings on.
+    const requested = isRecord(body) && body.requested === true;
+    if (!requested && !manager.settings.autoBriefing) {
+      return c.json({ error: AUTO_BRIEFING_OFF, auto_briefing: false }, 409);
+    }
     const refresh = isRecord(body) && body.refresh === true;
     keepOpen(c);
     return briefing(manager, factory, refresh);
+  });
+
+  // What the panel needs before it asks for anything: whether it may brief by itself.
+  app.get('/api/manager/settings', (c) => {
+    const off = unavailableReason(manager);
+    return c.json({
+      available: off === null,
+      ...(off && { reason: off.error }),
+      auto_briefing: manager?.settings.autoBriefing ?? false,
+      login: manager?.login.mode ?? 'off',
+    });
   });
 }

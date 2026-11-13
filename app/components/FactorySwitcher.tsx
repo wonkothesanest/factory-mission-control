@@ -29,12 +29,10 @@ export function FactorySetupNotice({
   factories,
   rows,
   state,
-  rewind,
 }: {
   factories: readonly string[] | undefined;
   rows: readonly FactorySwitcherRow[] | undefined;
   state: PanelState;
-  rewind: string | null;
 }): ReactElement | null {
   if (state !== 'ready' || factories === undefined || rows === undefined) return null;
   const missing = factories.filter((name) => !rows.some((row) => row.factory === name));
@@ -42,13 +40,11 @@ export function FactorySetupNotice({
   const names = missing.map((name) => `“${name}”`).join(', ');
   return (
     <p className="w-full text-[length:var(--v3-t-micro)] text-[color:var(--v3-fg-3)] [overflow-wrap:anywhere]">
-      {rewind === null
-        ? `To load configured factories ${names}, run `
-        : `Configured factories ${names} are absent from this read-only rewind; switch back and, if setup is still needed, run `}
+      {`To load configured factories ${names}, run `}
       <code className="font-mono">bun run migrate -- --configured-factories</code> on check-* or
       have the owner run{' '}
-      <code className="font-mono">bun run migrate:main -- --configured-factories</code> on main,
-      using the server's environment.
+      <code className="font-mono">bun run migrate:main -- --configured-factories</code> on the live
+      database, using the server's environment (start.sh does this at every start).
     </p>
   );
 }
@@ -216,12 +212,7 @@ export function FactorySwitcher({ engine }: { engine?: string | null }): ReactEl
               onChoose={choose}
               engine={engine}
             />
-            <FactorySetupNotice
-              factories={factories}
-              rows={rows}
-              state={state}
-              rewind={live.status === 'ready' ? live.rewind : null}
-            />
+            <FactorySetupNotice factories={factories} rows={rows} state={state} />
           </>
         );
       }}

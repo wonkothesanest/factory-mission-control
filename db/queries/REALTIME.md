@@ -1,52 +1,39 @@
 # What a live query may use
 
 Every file in this directory except this one is a live query: one read-only `SELECT`, keyed by the
-factory as `$1`, sealed by the server and subscribed through Neon Realtime (engineering.md,
-PRD 11.1). The step screen's panels below `step-detail` also take the step's workflow and path as
-`$2` and `$3`, so each answers with that step's files alone: a panel's first snapshot grows with
-the size of its answer (#103). Every step query also takes, as its last parameter, the pin of the
-version the step's address names, `''` for the current version, and `home-map` takes the pin of the
-version the map's address names the same way, as `$2`; `step-versions` lists the versions either
-can name. Realtime refuses some SQL a database would run. The table below is what it accepted
-and rejected when `bun run test:live` ran each probe query on a check branch; `test:live` runs
-them again on every run and fails when a verdict or an error differs from this table.
+factory as `$1`, named by the browser and run by the server. The step screen's panels below
+`step-detail` also take the step's workflow and path as `$2` and `$3`, and every step query takes,
+as its last parameter, the pin of the version the step's address names (`''` for the current
+version); `home-map` takes the map's pin as `$2`.
 
-- `@neon/realtime`: 0.1.2
-- Run: check-816754c9, check-ff19c267 and check-bfb770e3, 2026-10-25; the now() error as worded on check-646f49ad, 2026-10-27; the value of 16 KiB or more as the app check of #336 saw it, 2026-11-04
+## How a query is live (local-factory port)
 
-| Feature                 | Probe                                                                                                                                                                                             | Verdict  | Error                                                                                                      |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------- |
-| count(*) aggregate      | `SELECT count(*)::int AS running FROM mc.laps WHERE factory = $1 AND status = 'running'`                                                                                                          | accepted |                                                                                                            |
-| CTE                     | `WITH r AS (SELECT run_id, factory FROM mc.laps WHERE status = 'running') SELECT run_id FROM r WHERE factory = $1`                                                                                | accepted |                                                                                                            |
-| LATERAL                 | `SELECT l.run_id, s.step_id FROM mc.laps l CROSS JOIN LATERAL (SELECT step_id FROM mc.lap_steps ls WHERE ls.run_id = l.run_id ORDER BY ls.started_at DESC LIMIT 1) s WHERE l.factory = $1`        | accepted |                                                                                                            |
-| DISTINCT ON             | `SELECT DISTINCT ON (run_id) run_id, step_id FROM mc.lap_steps ORDER BY run_id, started_at DESC`                                                                                                  | accepted |                                                                                                            |
-| window function         | `SELECT run_id, step_id, row_number() OVER (PARTITION BY run_id ORDER BY started_at) AS n FROM mc.lap_steps`                                                                                      | accepted |                                                                                                            |
-| now()                   | `SELECT run_id FROM mc.laps WHERE factory = $1 AND started_at < now()`                                                                                                                            | rejected | upstream_rejected: unsupported query: stable function is not approved for this operation: pg_catalog.now() |
-| VALUES list join        | `SELECT t.path, n.part FROM mc.arch_texts t JOIN (VALUES (0), (1)) AS n(part) ON n.part * 4000 < length(t.text)`                                                                                  | accepted |                                                                                                            |
-| set-returning function  | `SELECT t.path, n.part FROM mc.arch_texts t CROSS JOIN LATERAL generate_series(0, 1) AS n(part)`                                                                                                  | rejected | upstream_rejected: unsupported query: set-returning function source                                        |
-| value of 16 KiB or more | `SELECT w.name, w.yaml FROM mc.arch_workflows w WHERE w.name = 'archon-deliver-block'`                                                                                                            | accepted |                                                                                                            |
-| LEFT JOIN LATERAL       | `SELECT l.run_id, s.step_id FROM mc.laps l LEFT JOIN LATERAL (SELECT step_id FROM mc.lap_steps ls WHERE ls.run_id = l.run_id ORDER BY ls.started_at DESC LIMIT 1) s ON true WHERE l.factory = $1` | accepted |                                                                                                            |
-| UNION ALL               | `SELECT l.run_id::text AS id FROM mc.laps l WHERE l.factory = $1 UNION ALL SELECT p.sha FROM mc.pins p`                                                                                           | accepted |                                                                                                            |
-| NOT EXISTS              | `SELECT p.sha FROM mc.pins p WHERE NOT EXISTS (SELECT 1 FROM mc.laps l WHERE l.factory = $1 AND l.started_at > p.committed_at)`                                                                   | accepted |                                                                                                            |
-| starts_with()           | `SELECT p.sha, v.verdict FROM mc.pins p JOIN mc.verdicts v ON starts_with(p.sha, v.pin)`                                                                                                          | accepted |                                                                                                            |
-| EXISTS in CASE          | `SELECT i.number, CASE WHEN EXISTS (SELECT 1 FROM mc.issue_labels l WHERE l.issue_number = i.number) THEN 1 ELSE 0 END AS n FROM mc.issues i WHERE i.factory = $1`                                | accepted |                                                                                                            |
+Upstream sealed each query and subscribed to it through Neon Realtime. This install runs on the
+factory's own Postgres and has no Neon:
 
-A volatile function such as `now()` is rejected, so a query returns timestamps and the browser
-computes elapsed times. The probe for a value of 16 KiB or more was accepted on 2026-11-04: the
-subscription went live with defined data. The probe does not read the row or its length, so the
-size of the seeded `archon-deliver-block` YAML on that run (its source file was 19,895 bytes) and
-the largest value Realtime answers are not measured. Realtime did not answer such a query on
-2026-10-25 (no rows and no error). A query that returns whole files still splits each into parts of
-4000 characters, at most 16,000 bytes each, joining a `VALUES` list of part numbers because
-`generate_series` is refused (`db/queries.test.ts` lists the banned set-returning functions in
-`SET_RETURNING` and fails a live query that calls one), and the browser joins the parts.
-`test:live` seals the probes in debug mode to record why a query was rejected; the app seals in
-safe mode, where the browser sees only `upstream_rejected: upstream rejected` and no database
-structure.
+- The browser opens one WebSocket per tab at `/api/live/socket` and subscribes to a query file by
+  name, factory and arguments (`app/live/client.ts`). It never sends SQL. Its first rows also come
+  over plain HTTP (`POST /api/live/:name`), so a page paints while its socket opens.
+- The server runs the file on a read-only pool (`default_transaction_read_only`, a statement
+  timeout) and pushes the rows (`server/live-hub.ts`). Values arrive as Neon Realtime delivered
+  them: `int8` and `numeric` as strings, timestamps and dates as `Date`, json as values.
+- Every table in `mc` has a statement trigger that `NOTIFY`s `mc_live` with its name
+  (`mc_meta.notify_live`, installed by `bun run migrate`). The server `LISTEN`s
+  (`server/live-listen.ts`), and on a notification runs every subscribed query again, after a
+  100 ms debounce, and pushes the rows that changed. A poll every `MC_LIVE_POLL_MS` (default
+  15 s) covers a dropped LISTEN connection.
 
-A user-defined function is not probed on a check branch. The app check of #357 saw a query that
-called the `STABLE` function `mc.version_pin` refused with `upstream_rejected`, while the pre-change
-ledger and the timeline query subscribed on the same socket. The cause is inferred, not measured: a
-live query avoids calling a function of the `mc` schema (`db/queries.test.ts` fails one that does),
-and that the rewritten query reading `mc.versions` subscribes is still to be shown by an app check.
-The rejection reason is not recorded, because the app seals in safe mode.
+## The rules the queries keep
+
+The rules below came from what Neon Realtime accepted. They are kept: they hold every query to one
+plain read, and a query whose answer does not depend on the clock only changes when its rows do,
+so a refresh pushes nothing when nothing changed.
+
+- No volatile or clock function (`now()`, `random()`): a query returns timestamps and the browser
+  computes elapsed times. `db/queries.test.ts` refuses one.
+- No set-returning function as a source (`generate_series`, `unnest` ...): a query that returns whole
+  files splits each into parts of 4000 characters by joining a `VALUES` list of part numbers, and
+  the browser joins the parts. `db/queries.test.ts` lists the banned functions in `SET_RETURNING`.
+- No function of the `mc` schema: a query reads tables, so what it shows is what the rows say.
+- Every table a live query reads has a primary key, and live queries read the dashboard's own
+  tables, never Archon's.

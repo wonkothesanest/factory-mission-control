@@ -207,7 +207,20 @@ async function post(
     };
   }
   if (response.status === 503) {
-    return { failure: 'The Manager is not set up on this server: it needs a database connection.' };
+    // The server says why: no database, or (local-factory port) no Claude login of its own.
+    const reply = (await response.json().catch(() => null)) as { error?: unknown } | null;
+    const why =
+      typeof reply?.error === 'string' && reply.error !== ''
+        ? reply.error.split('\n', 1)[0]
+        : 'it needs a database connection';
+    return { failure: `The Manager is not set up on this server: ${why}.` };
+  }
+  if (response.status === 409) {
+    // local-factory port: a briefing nobody asked for, while automatic briefings are off.
+    const reply = (await response.json().catch(() => null)) as { error?: unknown } | null;
+    const why =
+      typeof reply?.error === 'string' ? reply.error.split('\n', 1)[0] : 'it was not asked for';
+    return { failure: `The Manager wrote no briefing: ${why}.` };
   }
   if (!response.ok || response.body === null) {
     const reply = (await response.json().catch(() => null)) as { error?: unknown } | null;
@@ -220,8 +233,43 @@ async function post(
 export const postChat = (request: ChatRequest, signal: AbortSignal, fetchImpl: Fetch = fetch) =>
   post('/api/manager/chat', request, signal, fetchImpl);
 
-export const postBriefing = (factory: string, signal: AbortSignal, fetchImpl: Fetch = fetch) =>
-  post('/api/manager/briefing', { factory }, signal, fetchImpl);
+/**
+ * Asks for today's briefing. `requested` says a person pressed for it; without it the server
+ * writes one only when automatic briefings are on (local-factory port: off by default, since
+ * each briefing is a Claude run on the operator's login).
+ */
+export const postBriefing = (
+  factory: string,
+  signal: AbortSignal,
+  fetchImpl: Fetch = fetch,
+  requested = false,
+) =>
+  post(
+    '/api/manager/briefing',
+    requested ? { factory, requested: true } : { factory },
+    signal,
+    fetchImpl,
+  );
+
+/** What the server lets the panel do by itself; anything unreadable reads as "ask first". */
+export interface ManagerSettingsView {
+  autoBriefing: boolean;
+}
+
+export async function getManagerSettings(
+  signal: AbortSignal,
+  fetchImpl: Fetch = fetch,
+): Promise<ManagerSettingsView> {
+  try {
+    const response = await fetchImpl('/api/manager/settings', { signal });
+    if (!response.ok) return { autoBriefing: false };
+    const body = (await response.json()) as { auto_briefing?: unknown } | null;
+    return { autoBriefing: body?.auto_briefing === true };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return { autoBriefing: false };
+  }
+}
 
 export type ManagerLink = Extract<ManagerEvent, { type: 'link' }>;
 export type ManagerProposal = Extract<ManagerEvent, { type: 'proposal' }>;

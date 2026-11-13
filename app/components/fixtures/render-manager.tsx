@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 import { Shell } from '../../Shell';
 import { ActionControl } from '../Attention';
-import { Socket } from './render-flow';
+import { FakeLiveSocket } from '../../live/fixtures/fake-socket';
 
 const RUN = '5eed0001-0000-4000-8000-0000000000a1';
 
@@ -66,13 +66,14 @@ function record() {
 
 let current: { unmount: () => void; go: (url: string) => void; path: () => string } | undefined;
 
-/** Mounts the real shell over a fake dashboard server at `url`. */
-export function mount(url: string) {
+/**
+ * Mounts the real shell over a fake dashboard server at `url`; `autoBriefing` is what the server's
+ * MC_MANAGER_AUTO_BRIEFING says (on here unless a test turns it off).
+ */
+export function mount(url: string, { autoBriefing = true }: { autoBriefing?: boolean } = {}) {
   current?.unmount();
   const note = record();
   const originalFetch = window.fetch;
-  const header = btoa(JSON.stringify({ alg: 'dir', enc: 'A256GCM', v: 1 })).replace(/=+$/, '');
-  let asked = 0;
   window.fetch = Object.assign(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const target = String(input);
@@ -86,6 +87,9 @@ export function mount(url: string) {
         return Response.json({ id: 1, sent: false, ok: null, exit_code: null, summary: '' });
       }
       if (target === '/api/actions') return Response.json({ factories: ['x', 'y'] });
+      if (target === '/api/manager/settings') {
+        return Response.json({ available: true, auto_briefing: autoBriefing, login: 'home' });
+      }
       if (target === '/api/manager/briefing') {
         return lines(
           { type: 'text', text: `Quiet night.${'\n\nFiller line.'.repeat(60)}` },
@@ -131,25 +135,11 @@ export function mount(url: string) {
           DONE,
         );
       }
-      const n = asked++;
-      return Response.json({
-        capability: `${header}..${n}.test.tag`,
-        queryFingerprint: n.toString(16).padStart(64, '0'),
-        expiresAt: Date.now() + 60_000,
-        rewind: null,
-      });
+      return Response.json({ error: 'not served by this fixture' }, { status: 404 });
     },
     { preconnect: originalFetch.preconnect },
   );
-  window.__MC_LIVE__ = {
-    url: 'wss://test/',
-    home: 'wss://test/',
-    factories: ['x', 'y'],
-    rewind: null,
-    protocol: 'neon.realtime.v1',
-    early: [JSON.stringify({ type: 'ready' })],
-    socket: new Socket(() => '') as unknown as WebSocket,
-  };
+  window.__MC_LIVE__ = { factories: ['x', 'y'], socket: new FakeLiveSocket(() => undefined) };
   const router = createMemoryRouter(
     [
       {
@@ -226,6 +216,10 @@ export const shown = () => ({
     return box ? { top: box.scrollTop, room: box.scrollHeight - box.clientHeight } : null;
   })(),
 });
+
+export const clickBriefingOffer = () => q('[data-briefing-offer] button')?.click();
+
+export const offered = () => q('[data-briefing-offer]') !== null;
 
 export const clickOpenRun = () =>
   [...document.querySelectorAll<HTMLAnchorElement>('a')]

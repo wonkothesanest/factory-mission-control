@@ -6,6 +6,7 @@ import { REVIEW_OUTCOMES, type Review } from '../parsers/comments';
 import { VERDICT_OUTCOMES } from '../parsers/commits';
 import { HOLDOUT_VERDICTS } from '../parsers/metrics';
 import { TABLE_KEYS } from '../scripts/fixture/seed-architecture';
+import { ADOPT_SQL } from '../scripts/lib/archon-guard';
 import type { Db, Row } from '../scripts/lib/db';
 import { runMigrations } from '../scripts/migrate';
 import { archonDb, migrationFiles as files } from './test-db';
@@ -18,22 +19,23 @@ let archonBefore: Row[][] = [];
 
 /**
  * What a migration could change on Archon's tables: columns, indexes, constraints, and triggers
- * other than the projection's.
+ * other than the guard's (local-factory port: the projection's own triggers live on shadow
+ * tables in mc_guard, scripts/lib/archon-guard.ts).
  */
 const archonSchema = (): Promise<Row[][]> =>
   Promise.all([
     db.query(`SELECT table_name, column_name, data_type, is_nullable, column_default
       FROM information_schema.columns WHERE table_schema = 'public'
-        AND table_name <> 'mc_schema_migrations' ORDER BY table_name, column_name`),
+        ORDER BY table_name, column_name`),
     db.query(`SELECT tablename, indexname, indexdef FROM pg_indexes
-      WHERE schemaname = 'public' AND tablename <> 'mc_schema_migrations' ORDER BY indexname`),
+      WHERE schemaname = 'public' ORDER BY indexname`),
     db.query(`SELECT c.relname, k.conname, pg_get_constraintdef(k.oid) AS def
       FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relname <> 'mc_schema_migrations' ORDER BY k.conname`),
+      WHERE n.nspname = 'public' ORDER BY k.conname`),
     db.query(`SELECT c.relname, t.tgname FROM pg_trigger t
       JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND t.tgname NOT LIKE 'mc_project_%' ORDER BY t.tgname`),
+      WHERE n.nspname = 'public' AND t.tgname NOT LIKE 'mc_guard_%' ORDER BY t.tgname`),
   ]);
 
 beforeAll(async () => {
@@ -46,7 +48,11 @@ afterAll(() => db.close());
 test('applies every migration once and none on a second run', async () => {
   expect(firstRun).toEqual(files.map((file) => file.name));
   expect(await runMigrations({ files, db })).toEqual([]);
-  for (const file of files) await db.query(file.sql);
+  // Each file again, as the runner applies one: its SQL, then its triggers onto the shadows.
+  for (const file of files) {
+    await db.query(file.sql);
+    await db.query(ADOPT_SQL);
+  }
 });
 
 test("keys each mc.arch_* table as the fixture seed's TABLE_KEYS say", async () => {
@@ -186,33 +192,61 @@ test('refuses holdout text wherever a line could carry it', async () => {
   await lapStep('pick', null);
 });
 
-test("adds only the projection's triggers to Archon's schema", async () => {
+test("adds only the guard's triggers to Archon's schema, and the projection's to its shadows", async () => {
   const publicTables = (
     await db.query(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name`,
     )
   ).map((row) => row.table_name);
   expect(publicTables).toEqual([
-    'mc_schema_migrations',
     'remote_agent_codebases',
     'remote_agent_state_revisions',
     'remote_agent_workflow_events',
     'remote_agent_workflow_runs',
   ]);
   expect(await archonSchema()).toEqual(archonBefore);
-  const projection = await db.query(`SELECT c.relname, t.tgname FROM pg_trigger t
-    JOIN pg_class c ON c.oid = t.tgrelid WHERE t.tgname LIKE 'mc_project_%' ORDER BY t.tgname`);
-  expect(projection).toEqual([
-    { relname: 'remote_agent_workflow_runs', tgname: 'mc_project_attention_delete' },
-    { relname: 'remote_agent_workflow_runs', tgname: 'mc_project_attention_insert' },
-    { relname: 'remote_agent_workflow_runs', tgname: 'mc_project_attention_update' },
-    { relname: 'remote_agent_workflow_events', tgname: 'mc_project_metric_records' },
-    { relname: 'remote_agent_workflow_runs', tgname: 'mc_project_metric_records_delete' },
-    { relname: 'remote_agent_workflow_runs', tgname: 'mc_project_run_insert' },
-    { relname: 'remote_agent_workflow_runs', tgname: 'mc_project_run_update' },
-    { relname: 'remote_agent_workflow_events', tgname: 'mc_project_step_event' },
-    { relname: 'remote_agent_state_revisions', tgname: 'mc_project_work_item_state' },
+  const onArchon = await db.query(`SELECT c.relname, t.tgname, p.proname FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_proc p ON p.oid = t.tgfoid
+    WHERE n.nspname = 'public' AND NOT t.tgisinternal ORDER BY c.relname, t.tgname`);
+  expect(onArchon).toEqual([
+    {
+      relname: 'remote_agent_state_revisions',
+      tgname: 'mc_guard_projection',
+      proname: 'guard_remote_agent_state_revisions',
+    },
+    {
+      relname: 'remote_agent_workflow_events',
+      tgname: 'mc_guard_projection',
+      proname: 'guard_remote_agent_workflow_events',
+    },
+    {
+      relname: 'remote_agent_workflow_runs',
+      tgname: 'mc_guard_projection',
+      proname: 'guard_remote_agent_workflow_runs',
+    },
+    {
+      relname: 'remote_agent_workflow_runs',
+      tgname: 'mc_guard_truncate',
+      proname: 'guard_truncate_remote_agent_workflow_runs',
+    },
   ]);
+  const projection = await db.query(`SELECT n.nspname, c.relname, t.tgname FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE t.tgname LIKE 'mc_project_%' ORDER BY t.tgname`);
+  expect(projection).toEqual(
+    [
+      ['remote_agent_workflow_runs', 'mc_project_attention_delete'],
+      ['remote_agent_workflow_runs', 'mc_project_attention_insert'],
+      ['remote_agent_workflow_runs', 'mc_project_attention_update'],
+      ['remote_agent_workflow_events', 'mc_project_metric_records'],
+      ['remote_agent_workflow_runs', 'mc_project_metric_records_delete'],
+      ['remote_agent_workflow_runs', 'mc_project_run_insert'],
+      ['remote_agent_workflow_runs', 'mc_project_run_update'],
+      ['remote_agent_workflow_events', 'mc_project_step_event'],
+      ['remote_agent_state_revisions', 'mc_project_work_item_state'],
+    ].map(([relname, tgname]) => ({ nspname: 'mc_guard', relname, tgname })),
+  );
 });
 
 /** Compiles only when A and B are the same set of literals. */

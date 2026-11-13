@@ -15,7 +15,6 @@ import type { LapMapRow } from '../app/lib/lap-graph';
 import type { HandledRow } from '../app/lib/manager';
 import type { CheckLineRow, OneLapRow, StepAttemptRow } from '../app/lib/one-lap';
 import type { OwnerQueueRow } from '../app/lib/owner-queue';
-import type { RewindBranchRow } from '../app/lib/rewind';
 import type { RunsRow } from '../app/lib/runs';
 import type { ScorecardRow } from '../app/lib/scorecard';
 import type {
@@ -359,7 +358,6 @@ const ROW_COLUMNS: Record<string, string[]> = {
     'pr_number',
     'cost_usd',
   ]),
-  'rewind-branches': columns<RewindBranchRow>()(['name', 'parent', 'at', 'created_at']),
   scorecard: columns<ScorecardRow>()([
     'run_id',
     'digest',

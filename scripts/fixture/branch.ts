@@ -1,167 +1,100 @@
+// `bun run fixture:branch` (local-factory port): Neon branches are gone. A check gets its own
+// scratch database, `check-<id>`, on the same Postgres server as MC_DATABASE_URL (the factory's),
+// holding Archon's schema snapshot (fixtures/archon-schema.sql), the migrations and the seed. Each
+// checkout, worktree or parallel instance makes its own, so checks never share rows; the live
+// dashboard database is never written. `bun run fixture:drop` removes it.
+
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  CHECK_ENV_FILE,
-  formatCheckEnv,
-  loadCheckEnv,
-  parseCheckEnv,
-} from '../../server/check-env';
-import { writeLease } from '../../server/check-lease';
+import { CHECK_ENV_FILE, formatCheckEnv, parseCheckEnv } from '../../server/check-env';
 import { type Deps, failing, type Main, noArguments, runCli } from '../lib/cli';
-import type { Db } from '../lib/db';
-import { requireCheckBranch } from '../lib/guard';
-import { type NeonApi, poll, waitForOperations } from '../lib/neon';
+import { isCheckDatabase, requireCheckDatabase } from '../lib/guard';
+import { withDatabase } from '../lib/target';
 import { migrationsDir, readMigrationFiles, runMigrations } from '../migrate';
-import { hoursPhrase, STALE_MS, staleBranchPrefix } from './drop';
 
-const PARENT_BRANCH = 'fixture';
+/** The maintenance database a check database is created and dropped from. */
+export const ADMIN_DATABASE = 'postgres';
 
-const USAGE = [
-  "usage: bun run fixture:branch (creates a check-* branch from fixture, migrates and seeds it, writes .mc-check.env, and records this checkout's lease on the branch, naming the Archon run it runs in when there is one, so other checkouts' fixture:drop keep it while that run or this checkout still uses it; see fixture:drop --help)",
-  `       bun run fixture:branch --stale (creates <MC_CHECK_BRANCH>-stale-<id>, a bare branch that this checkout's fixture:drop deletes as stale and other sessions' drops leave until it is ${hoursPhrase(STALE_MS)} old; an unattended check runs it, then fixture:drop, to prove stale cleanup while other sessions hold check-* branches)`,
-].join('\n');
+const USAGE =
+  "usage: bun run fixture:branch (creates a check-* database on MC_DATABASE_URL's server with Archon's schema snapshot, the migrations and fixtures/seed.sql, and writes .mc-check.env naming it; run with the server's own MC_DATABASE_URL, never a check one)";
 
-function newCheckBranchName(prefix = 'check-'): string {
+export function newCheckDatabaseName(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(4));
-  return `${prefix}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+  return `check-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
-async function parentBranch(api: NeonApi): Promise<{ id: string }> {
-  const parent = (await api.listBranches()).find((branch) => branch.name === PARENT_BRANCH);
-  if (!parent) throw new Error(`no branch named ${PARENT_BRANCH}: the owner creates it from main`);
-  return parent;
-}
+/** A database name as an SQL identifier: check names hold a dash. */
+export const quoteDatabase = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
-async function deleteAfterFailure(
-  api: NeonApi,
-  branch: { id: string; name: string },
-  deps: Deps,
-): Promise<void> {
-  await api
-    .deleteBranch(branch)
-    .then((operations) => waitForOperations(api, operations, deps.sleep))
-    .catch((cleanup) => deps.err(`could not delete ${branch.name}, fixture:drop will: ${cleanup}`));
-}
-
-/** A bare branch, no database work: `fixture:drop` only needs it to exist. */
-async function createStaleBranch(deps: Deps): Promise<void> {
-  loadCheckEnv(deps.repoRoot, deps.env);
-  const own = deps.env.MC_CHECK_BRANCH;
-  if (!own) {
+/** The server's connection string: MC_DATABASE_URL from the launching process, never a check one. */
+async function serverUrl(deps: Deps): Promise<string> {
+  const url = deps.env.MC_DATABASE_URL;
+  if (!url) throw new Error("MC_DATABASE_URL is not set: give the factory database's URL");
+  if (isCheckDatabase(await deps.databaseName(url))) {
     throw new Error(
-      "--stale needs this checkout's check branch: run `bun run fixture:branch` first",
+      'MC_DATABASE_URL already names a check database: run fixture:branch with the server URL',
     );
   }
-  requireCheckBranch(own);
-  const api = deps.neon();
-  const parent = await parentBranch(api);
-  const name = newCheckBranchName(staleBranchPrefix(own));
-  const created = await api.createBranch({ name, parentId: parent.id });
-  try {
-    await waitForOperations(api, created.operations, deps.sleep);
-  } catch (error) {
-    await deleteAfterFailure(api, { id: created.branch.id, name }, deps);
-    throw error;
-  }
-  deps.out(`created ${name} (stale for fixture:drop)`);
+  return url;
 }
 
-const CONNECT_ATTEMPTS = 10;
-
-/** A new branch's compute may still be starting when its operations finish. */
-async function waitForCompute(db: Db, deps: Deps): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await db.query('SELECT 1');
-      return;
-    } catch (error) {
-      if (attempt === CONNECT_ATTEMPTS) throw error;
-      await deps.sleep(2000);
-    }
-  }
-}
-
-async function prepareDatabase(url: string, deps: Deps): Promise<void> {
-  const db = deps.openDb(url);
-  try {
-    await waitForCompute(db, deps);
-    for (const name of await runMigrations({
-      files: readMigrationFiles(migrationsDir(deps.repoRoot)),
-      db,
-    })) {
-      deps.out(`applied ${name}`);
-    }
-    const seed = join(deps.repoRoot, 'fixtures', 'seed.sql');
-    if (existsSync(seed)) {
-      const sql = readFileSync(seed, 'utf-8');
-      await db.transaction((tx) => tx.query(sql).then(() => undefined));
-      deps.out('loaded fixtures/seed.sql');
-    }
-  } finally {
-    await db.close();
-  }
-}
-
-async function createSessionBranch(deps: Deps): Promise<void> {
+async function createCheckDatabase(deps: Deps): Promise<void> {
   const envFile = join(deps.repoRoot, CHECK_ENV_FILE);
   const existing = existsSync(envFile)
-    ? parseCheckEnv(readFileSync(envFile, 'utf-8')).MC_CHECK_BRANCH
+    ? parseCheckEnv(readFileSync(envFile, 'utf-8')).MC_CHECK_DATABASE
     : undefined;
   if (existing) {
     throw new Error(
       `${CHECK_ENV_FILE} already names ${existing}: run \`bun run fixture:drop\` first`,
     );
   }
-  const api = deps.neon();
-  const parent = await parentBranch(api);
-
-  const name = newCheckBranchName();
-  const created = await api.createBranch({ name, parentId: parent.id });
-  const branch = { id: created.branch.id, name };
+  const server = await serverUrl(deps);
+  const name = newCheckDatabaseName();
+  requireCheckDatabase(name);
+  const admin = deps.openDb(withDatabase(server, ADMIN_DATABASE));
   try {
-    await waitForOperations(api, created.operations, deps.sleep);
-    const url = created.connection_uris?.[0]?.connection_uri;
-    if (!url)
-      throw new Error(
-        `Neon returned no connection string: ${PARENT_BRANCH} has several roles or databases`,
-      );
-    await poll(
-      `Realtime on ${name}`,
-      async () => {
-        const realtime = await api.getRealtime(branch.id);
-        return realtime.enabled && !realtime.pending ? true : undefined;
-      },
-      { sleep: deps.sleep },
-    );
-    const secret = await api.getRealtimeSecret(branch.id);
-    await prepareDatabase(url, deps);
-    writeFileSync(
-      envFile,
-      formatCheckEnv({
-        MC_CHECK_BRANCH: name,
-        MC_DATABASE_URL: url,
-        NEON_REALTIME_SECRET: secret,
-      }),
-    );
-    if (!writeLease(deps.leaseDir, name, deps.now(), deps.env.WORKFLOW_ID)) {
-      deps.err(
-        `could not record a lease for ${name} in ${deps.leaseDir}: other checkouts' fixture:drop will delete it once it is ${hoursPhrase(STALE_MS)} old`,
-      );
+    await admin.query(`CREATE DATABASE ${quoteDatabase(name)}`);
+  } finally {
+    await admin.close();
+  }
+  const url = withDatabase(server, name);
+  try {
+    const db = deps.openDb(url);
+    try {
+      const archon = join(deps.repoRoot, 'fixtures', 'archon-schema.sql');
+      await db.query(readFileSync(archon, 'utf-8'));
+      deps.out('loaded fixtures/archon-schema.sql');
+      for (const applied of await runMigrations({
+        files: readMigrationFiles(migrationsDir(deps.repoRoot)),
+        db,
+      })) {
+        deps.out(`applied ${applied}`);
+      }
+      const seed = join(deps.repoRoot, 'fixtures', 'seed.sql');
+      if (existsSync(seed)) {
+        const sql = readFileSync(seed, 'utf-8');
+        await db.transaction((tx) => tx.query(sql).then(() => undefined));
+        deps.out('loaded fixtures/seed.sql');
+      }
+    } finally {
+      await db.close();
     }
+    writeFileSync(envFile, formatCheckEnv({ MC_CHECK_DATABASE: name, MC_DATABASE_URL: url }), {
+      mode: 0o600,
+    });
   } catch (error) {
-    await deleteAfterFailure(api, branch, deps);
+    const cleanup = deps.openDb(withDatabase(server, ADMIN_DATABASE));
+    await cleanup
+      .query(`DROP DATABASE IF EXISTS ${quoteDatabase(name)} WITH (FORCE)`)
+      .catch((e) => deps.err(`could not drop ${name}, fixture:drop --all will: ${e}`))
+      .finally(() => cleanup.close());
     throw error;
   }
   deps.out(`created ${name}`);
   deps.out(`wrote ${CHECK_ENV_FILE}`);
 }
 
-export const main: Main = async (argv, deps) => {
-  if (argv.length === 1 && argv[0] === '--stale')
-    return failing(deps, () => createStaleBranch(deps));
-  return (
-    noArguments(argv, USAGE, deps, ['--stale']) ?? failing(deps, () => createSessionBranch(deps))
-  );
-};
+export const main: Main = async (argv, deps) =>
+  noArguments(argv, USAGE, deps) ?? failing(deps, () => createCheckDatabase(deps));
 
 if (import.meta.main) await runCli(main);

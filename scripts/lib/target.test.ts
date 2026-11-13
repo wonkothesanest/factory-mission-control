@@ -1,17 +1,21 @@
 import { expect, test } from 'bun:test';
-import { endpointIdOf } from './target';
+import { databaseNameOf, withDatabase } from './target';
 
-test('endpointIdOf reads direct and pooled Neon hosts', () => {
-  expect(endpointIdOf('postgresql://u:p@ep-cool-sun-a1b2c3.us-east-2.aws.neon.tech/db')).toBe(
-    'ep-cool-sun-a1b2c3',
+test('databaseNameOf reads the database a postgres URL names', () => {
+  expect(databaseNameOf('postgresql://u:p@127.0.0.1:55432/archon')).toBe('archon');
+  expect(databaseNameOf('postgres://u:p@localhost/check-0a1b2c3d?sslmode=disable')).toBe(
+    'check-0a1b2c3d',
   );
-  expect(
-    endpointIdOf('postgresql://u:p@ep-cool-sun-a1b2c3-pooler.c-2.us-east-2.aws.neon.tech/db'),
-  ).toBe('ep-cool-sun-a1b2c3');
 });
 
-test('endpointIdOf is null for anything that is not a Neon endpoint', () => {
-  expect(endpointIdOf('postgresql://u:p@localhost:5432/db')).toBeNull();
-  expect(endpointIdOf('postgresql://u:p@ep-x.neon.tech.evil.example/db')).toBeNull();
-  expect(endpointIdOf('not a url')).toBeNull();
+test('databaseNameOf refuses anything that names no database', () => {
+  expect(() => databaseNameOf('not a url')).toThrow('not a connection string');
+  expect(() => databaseNameOf('https://example.com/db')).toThrow('not a postgres');
+  expect(() => databaseNameOf('postgresql://u:p@localhost:5432/')).toThrow('names no database');
+});
+
+test('withDatabase keeps the server and role and swaps the database', () => {
+  expect(withDatabase('postgresql://u:p@127.0.0.1:55432/archon', 'check-abc')).toBe(
+    'postgresql://u:p@127.0.0.1:55432/check-abc',
+  );
 });

@@ -177,6 +177,35 @@ test('switching factory with the panel open gives the new factory its own briefi
   expect(result.briefed).toEqual(['{"factory":"x"}', '{"factory":"y"}']);
 }, 30_000);
 
+test('with automatic briefings off, opening the panel asks for nothing until the button is pressed', async () => {
+  await page.setViewport(1600);
+  const result = await page.evaluate<{
+    before: { offered: boolean; briefing: string | null; briefed: string[] };
+    after: { offered: boolean; briefing: string | null; briefed: string[] };
+  }>(
+    `import('data:text/javascript;base64,${source}').then(async (m) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const state = () => ({
+        offered: m.offered(),
+        briefing: m.shown().briefing,
+        briefed: m.requests().filter((r) => r.url === '/api/manager/briefing').map((r) => r.body),
+      });
+      m.mount('/f/x', { autoBriefing: false });
+      await sleep(1200);
+      const before = state();
+      m.clickBriefingOffer();
+      await sleep(800);
+      return { before, after: state() };
+    })`,
+  );
+  expect(result.before.offered).toBe(true);
+  expect(result.before.briefing).toBeNull();
+  expect(result.before.briefed).toEqual([]);
+  expect(result.after.offered).toBe(false);
+  expect(result.after.briefing).toContain('Quiet night.');
+  expect(result.after.briefed).toEqual(['{"factory":"x","requested":true}']);
+}, 30_000);
+
 test('Open run on an Attention card is a route change: the Manager conversation and the document survive', async () => {
   await page.setViewport(1440);
   const result = await page.evaluate<{ marker: boolean; before: Seen; after: Seen; path: string }>(

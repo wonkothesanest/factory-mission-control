@@ -1,87 +1,208 @@
-import { afterEach, expect, jest, spyOn, test } from 'bun:test';
-import type { RealtimeClient } from '@neon/realtime/client';
-import { LIVE_STABLE_MS } from './LivePanel';
+import { expect, test } from 'bun:test';
 import {
-  type Connect,
-  REPLACE_CEILING_MS,
-  REPLACE_FIRST_MS,
-  REPLACE_STABLE_MS,
-  shareLive,
-} from './LiveProvider';
+  createLiveClient,
+  RECONNECT_CEILING_MS,
+  RECONNECT_FIRST_MS,
+  type SocketLike,
+} from './client';
+import { type Live, shareLive } from './LiveProvider';
 
-interface Fake {
-  url: string;
-  end: () => void;
-  ended: boolean;
-  closed: boolean;
+type Listener = (event: { data?: unknown }) => void;
+
+/** A socket the test drives: it records what the client sends and fires what the test says. */
+class TestSocket implements SocketLike {
+  readyState = 0;
+  readonly sent: Record<string, unknown>[] = [];
+  private listeners = new Map<string, Listener[]>();
+  addEventListener(type: string, listener: Listener) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+  fire(type: string, data?: unknown) {
+    if (type === 'open') this.readyState = 1;
+    if (type === 'close') this.readyState = 3;
+    for (const listener of this.listeners.get(type) ?? []) listener({ data });
+  }
+  send(data: string) {
+    this.sent.push(JSON.parse(data));
+  }
+  close() {
+    this.fire('close');
+  }
 }
 
-function harness(rewind: string | null) {
-  const opened: Fake[] = [];
-  const open: Connect = (url, _transport, ended) => {
-    const fake: Fake = {
-      url,
-      ended: false,
-      closed: false,
-      end: () => {
-        fake.ended = true;
-        ended();
-      },
-    };
-    opened.push(fake);
-    return {
-      subscribe() {},
-      close() {
-        fake.closed = true;
-      },
-    } as unknown as RealtimeClient;
-  };
-  const stop = shareLive(
-    { url: 'wss://main', home: 'wss://home', factories: [], rewind, protocol: 'p' },
-    () => {},
-    open,
+function harness() {
+  const sockets: TestSocket[] = [];
+  const waits: { ms: number; then: () => void }[] = [];
+  const client = createLiveClient(
+    () => {
+      const socket = new TestSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    { wait: (ms, then) => waits.push({ ms, then }) },
   );
-  /** Ends the latest client on `url` and returns how long until its replacement opens. */
-  const endAndTime = (url: string): number => {
-    const before = opened.length;
-    const latest = opened.filter((f) => f.url === url).at(-1);
-    if (!latest) throw new Error(`no client on ${url}`);
-    latest.end();
-    let ms = 0;
-    while (opened.length === before) {
-      if (ms > 2 * REPLACE_CEILING_MS) throw new Error('never replaced');
-      jest.advanceTimersByTime(100);
-      ms += 100;
-    }
-    return ms;
-  };
-  return { opened, endAndTime, stop };
+  return { client, sockets, waits };
 }
 
-afterEach(() => {
-  jest.useRealTimers();
-  jest.restoreAllMocks();
+test('subscriptions made before the socket opens are sent once it does, with their arguments', () => {
+  const { client, sockets } = harness();
+  client.subscribe({ query: 'status-strip', factory: 'f' }, { rows: () => {}, error: () => {} });
+  client.subscribe(
+    { query: 'step-detail', factory: 'f', args: ['wf', 'review', ''] },
+    { rows: () => {}, error: () => {} },
+  );
+  expect(sockets[0]?.sent).toEqual([]);
+  sockets[0]?.fire('open');
+  expect(sockets[0]?.sent).toEqual([
+    { type: 'subscribe', id: 's1', query: 'status-strip', factory: 'f' },
+    { type: 'subscribe', id: 's2', query: 'step-detail', factory: 'f', args: ['wf', 'review', ''] },
+  ]);
 });
 
-test.each([
-  ['wss://main', null],
-  ['wss://home', 'rewind-x'],
-] as const)(
-  'a client on %s that ends after a healthy stretch is replaced after REPLACE_FIRST_MS, and quick ends still back off',
-  (url, rewind) => {
-    jest.useFakeTimers();
-    spyOn(console, 'warn').mockImplementation(() => {});
-    const h = harness(rewind);
-    const waits = [1, 2, 3, 4, 5, 6].map(() => h.endAndTime(url));
-    expect(waits).toEqual([1000, 2000, 4000, 8000, 16000, 16000]);
-    jest.advanceTimersByTime(REPLACE_STABLE_MS);
-    expect(h.endAndTime(url)).toBe(REPLACE_FIRST_MS);
-    expect(h.endAndTime(url)).toBe(2 * REPLACE_FIRST_MS);
-    h.stop();
-    expect(h.opened.filter((f) => f.ended && f.closed)).toEqual([]);
-  },
-);
+test('rows and errors reach only the subscription they name, with timestamps as Date', () => {
+  const { client, sockets } = harness();
+  const seen: unknown[] = [];
+  client.subscribe(
+    { query: 'a', factory: 'f' },
+    { rows: (r) => seen.push(['a', r]), error: (e) => seen.push(['a!', e]) },
+  );
+  client.subscribe(
+    { query: 'b', factory: 'f' },
+    { rows: (r) => seen.push(['b', r]), error: () => {} },
+  );
+  const socket = sockets[0] as TestSocket;
+  socket.fire('open');
+  socket.fire(
+    'message',
+    JSON.stringify({
+      type: 'rows',
+      id: 's2',
+      rows: [{ at: { $date: '2026-11-12T00:00:00.000Z' } }],
+    }),
+  );
+  socket.fire('message', JSON.stringify({ type: 'error', id: 's1', error: 'the query failed' }));
+  socket.fire('message', 'garbage');
+  expect(seen).toEqual([
+    ['b', [{ at: new Date('2026-11-12T00:00:00.000Z') }]],
+    ['a!', 'the query failed'],
+  ]);
+});
 
-test('the stable period matches the panels', () => {
-  expect(REPLACE_STABLE_MS).toBe(LIVE_STABLE_MS);
+test('an unsubscribe is sent and its rows are no longer delivered', () => {
+  const { client, sockets } = harness();
+  const seen: unknown[] = [];
+  const stop = client.subscribe(
+    { query: 'a', factory: 'f' },
+    { rows: (r) => seen.push(r), error: () => {} },
+  );
+  const socket = sockets[0] as TestSocket;
+  socket.fire('open');
+  stop();
+  stop();
+  socket.fire('message', JSON.stringify({ type: 'rows', id: 's1', rows: [] }));
+  expect(seen).toEqual([]);
+  expect(socket.sent.at(-1)).toEqual({ type: 'unsubscribe', id: 's1' });
+  expect(socket.sent.filter((m) => m.type === 'unsubscribe')).toHaveLength(1);
+});
+
+test('a dropped socket tells every subscription, reopens after a doubling wait and subscribes again', () => {
+  const { client, sockets, waits } = harness();
+  let lost = 0;
+  client.subscribe(
+    { query: 'a', factory: 'f' },
+    { rows: () => {}, error: () => {}, lost: () => lost++ },
+  );
+  sockets[0]?.fire('open');
+  sockets[0]?.fire('close');
+  expect(lost).toBe(1);
+  expect(waits.map((w) => w.ms)).toEqual([RECONNECT_FIRST_MS]);
+  waits[0]?.then();
+  sockets[1]?.fire('error');
+  waits[1]?.then();
+  expect(waits.map((w) => w.ms)).toEqual([RECONNECT_FIRST_MS, RECONNECT_FIRST_MS * 2]);
+  sockets[2]?.fire('open');
+  expect(sockets[2]?.sent).toEqual([{ type: 'subscribe', id: 's1', query: 'a', factory: 'f' }]);
+  for (let i = 0; i < 10; i++) {
+    const socket = sockets.at(-1) as TestSocket;
+    socket.fire('close');
+    waits.at(-1)?.then();
+  }
+  expect(Math.max(...waits.map((w) => w.ms))).toBe(RECONNECT_CEILING_MS);
+});
+
+test('a snapshot paints first, and is dropped once the socket has answered', async () => {
+  const delivered: unknown[] = [];
+  let release: (rows: unknown[]) => void = () => {};
+  const late = new Promise<unknown[]>((ok) => {
+    release = ok;
+  });
+  const sockets: TestSocket[] = [];
+  const client = createLiveClient(
+    () => {
+      const socket = new TestSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    {
+      wait: () => {},
+      snapshot: async ({ query }) => (query === 'early' ? [{ from: 'http' }] : late),
+    },
+  );
+  client.subscribe(
+    { query: 'early', factory: 'f' },
+    { rows: (r) => delivered.push(r), error: () => {} },
+  );
+  client.subscribe(
+    { query: 'late', factory: 'f' },
+    { rows: (r) => delivered.push(r), error: () => {} },
+  );
+  await Bun.sleep(1);
+  expect(delivered).toEqual([[{ from: 'http' }]]);
+  const socket = sockets[0] as TestSocket;
+  socket.fire('open');
+  socket.fire('message', JSON.stringify({ type: 'rows', id: 's2', rows: [{ from: 'socket' }] }));
+  release([{ from: 'stale http' }]);
+  await Bun.sleep(1);
+  expect(delivered).toEqual([[{ from: 'http' }], [{ from: 'socket' }]]);
+});
+
+test('a closed client opens no new socket', () => {
+  const { client, sockets, waits } = harness();
+  client.close();
+  expect(sockets).toHaveLength(1);
+  expect(waits).toEqual([]);
+});
+
+test('with the configuration in the page the provider is ready at once, and closes its client on cleanup', () => {
+  const states: Live[] = [];
+  let closed = false;
+  const stop = shareLive(
+    { factories: ['x'] },
+    (live) => states.push(live),
+    () => ({
+      subscribe: () => () => {},
+      close: () => {
+        closed = true;
+      },
+    }),
+  );
+  expect(states.map((s) => s.status)).toEqual(['ready']);
+  expect(states[0]?.status === 'ready' && states[0].factories).toEqual(['x']);
+  stop();
+  expect(closed).toBe(true);
+});
+
+test('without it the provider asks GET /api/live and reports an error when that fails', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = Object.assign(async () => new Response('no', { status: 503 }), {
+    preconnect: original.preconnect,
+  });
+  try {
+    const states: Live[] = [];
+    shareLive(undefined, (live) => states.push(live));
+    await Bun.sleep(10);
+    expect(states.map((s) => s.status)).toEqual(['error']);
+  } finally {
+    globalThis.fetch = original;
+  }
 });

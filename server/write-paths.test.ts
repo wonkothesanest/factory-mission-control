@@ -29,40 +29,34 @@ const remedy =
 const SPAWN_SITES: Record<string, string> = {
   'server/actions.ts': 'the two writes',
   'server/build-id.ts': 'git rev-parse',
+  'function/local-pins.ts': 'git log -1 --format=%aI on an app checkout, read-only (local pins)',
   'server/manager.ts': 'the Manager agent: read-only tools, proven by manager-tools.test.ts',
   'scripts/lib/archon-run.ts': 'workflow get, read',
   'scripts/lib/cdp.ts': 'headless Chrome',
-  'scripts/lib/cli.ts': "runs this repository's own scripts",
-  'scripts/idle-check.ts': 'runs the local function',
-  'scripts/live/shared.ts': 'bun run fixture:write on a check branch',
-  'scripts/live/switcher.ts': 'serves the app',
-  'scripts/test-live.ts': 'serves the app',
+  'scripts/local-arch.ts': 'git rev-parse HEAD on the factory template checkout, read-only',
+  'scripts/restart-test.ts': 'start.sh against the scratch database it creates and drops',
 };
 
 const FETCH_SITES: Record<string, string> = {
   'app/lib/actions.ts': 'same-origin /api/',
   'app/lib/manager.ts': 'same-origin /api/',
-  'app/lib/rewind.ts': 'same-origin /api/',
-  'app/live/LivePanel.tsx': 'same-origin /api/',
+  'app/live/client.ts': 'same-origin /api/',
   'app/live/LiveProvider.tsx': 'same-origin /api/',
-  'function/github.ts': 'GET only',
-  'scripts/lib/github.ts': 'GET only',
-  'scripts/lib/neon.ts': 'the Neon API: database branches, not GitHub, Archon or a factory',
-  'scripts/lib/cli.ts': 'passes the real fetch to its dependants',
-  'scripts/idle-check.ts': 'the local function',
-  'scripts/live/shared.ts': 'the local app',
-  'scripts/live/switcher.ts': 'the local app',
+  'function/github.ts': 'GET only, through a fetch and a root handed to it (no network default)',
+  'server/serve.ts':
+    "Bun.serve's own request handler, named fetch: it answers requests, it sends none",
+  'scripts/restart-test.ts': 'GET /api/health and /api/forge of its own server on 127.0.0.1',
 };
 
 const ARCHON_FIXTURE_WRITERS: Record<string, string> = {
   'scripts/fixture/write.ts':
     'fixture:write, connects only through guardedDatabaseUrl(deps, "check")',
   'scripts/fixture/seed-laps.ts': 'generates the SQL fixture:write runs on a check branch',
-  'scripts/test-live.ts': 'connects only through guardedDatabaseUrl(deps, "check")',
   'scripts/projection-locks.ts': 'connects only through guardedDatabaseUrl(deps, "check")',
-  'scripts/live/board.ts': 'a phase test-live.ts runs on its guarded check branch',
-  'scripts/live/queue-map.ts': 'a phase test-live.ts runs on its guarded check branch',
-  'scripts/live/work-item.ts': 'a phase test-live.ts runs on its guarded check branch',
+  'scripts/safety-test.ts':
+    'writes Archon-shaped rows only in the check-safety-* scratch database it creates and drops',
+  'scripts/restart-test.ts':
+    'writes Archon-shaped rows only in the scratch-restart-* database it creates and drops',
 };
 
 const SPAWN =
@@ -110,13 +104,15 @@ test('only the listed files make network calls, and the browser only calls its o
       expect(call[1], `${file} calls something other than its own /api/`).toMatch(/^['"`]\/api\//);
     }
   }
-  for (const file of matching(/api\.github\.com/)) {
-    if (file === 'db/run-stops-corpus.ts') continue; // sample error text, not a call
-    expect(['function/github.ts', 'scripts/lib/github.ts']).toContain(file);
-    expect(sources.get(file), `${file} writes to GitHub`).not.toMatch(
-      /method: '(POST|PUT|PATCH|DELETE)'/,
-    );
-  }
+  // local-factory port: no code names GitHub's API or raw-content host at all (the run-stop
+  // corpus is sample error text that tests classify, not a call).
+  const hosts = matching(/api\.github\.com|raw\.githubusercontent\.com/).filter(
+    (file) => file !== 'db/run-stops-corpus.ts',
+  );
+  expect(hosts, 'a source names a GitHub network host').toEqual([]);
+  expect(sources.get('function/github.ts'), 'function/github.ts writes to GitHub').not.toMatch(
+    /method: '(POST|PUT|PATCH|DELETE)'/,
+  );
 });
 
 test("nothing writes Archon's tables except the check-branch fixture tooling", () => {

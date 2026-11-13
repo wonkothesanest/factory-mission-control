@@ -1,7 +1,7 @@
 import { Fragment, type ReactElement, type ReactNode, useCallback, useRef, useState } from 'react';
 import { Outlet, useLocation, useSearchParams } from 'react-router';
 import { ActionToastHost } from './components/ActionToast';
-import { FactoryStrip, FactoryStripBody, RewindIndicator } from './components/FactoryStrip';
+import { FactoryStrip, FactoryStripBody } from './components/FactoryStrip';
 import { FactorySwitcher } from './components/FactorySwitcher';
 import { FlowProvider } from './components/FlowToggle';
 import {
@@ -221,14 +221,7 @@ export function ForFactory(): ReactElement {
     );
   // One switcher at every width, outside the strip's panel, so a factory switch does not re-seal it.
   const switcher = <FactorySwitcher engine={engine} />;
-  const content = (
-    <div className="min-w-0 flex-1 overflow-auto">
-      <RewindIndicator
-        rewind={unknownKey === undefined && live.status === 'ready' ? live.rewind : null}
-      />
-      {page}
-    </div>
-  );
+  const content = <div className="min-w-0 flex-1 overflow-auto">{page}</div>;
   if (phone) {
     return (
       <div

@@ -25,7 +25,7 @@ import {
 import { isRunId } from '../app/lib/one-lap';
 import { type Db, openDb } from '../scripts/lib/db';
 import type { Env } from './check-env';
-import { BASE_ENV_NAMES, pick } from './child-env';
+import { BASE_ENV_NAMES, CACHE_NAMES, pick } from './child-env';
 import { isObject, readFactoryNames } from './factories';
 import { RESUMABLE_STATUSES } from './manager-stream';
 
@@ -226,7 +226,7 @@ async function spawnCli(operator: Operator, argvTail: string[]) {
   try {
     const child = Bun.spawn([...operator.command, ...argvTail], {
       cwd: operator.cwd,
-      env: { ...pick(process.env, BASE_ENV_NAMES), ...operator.env },
+      env: { ...pick(process.env, [...BASE_ENV_NAMES, ...CACHE_NAMES]), ...operator.env },
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: SPAWN_TIMEOUT_MS,

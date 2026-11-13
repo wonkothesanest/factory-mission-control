@@ -7,12 +7,12 @@ How this repository is built. The product is `docs/mission-control.prd.md`; this
 | Path | What lives there |
 |---|---|
 | `app/` | The browser app: React 19, Vite 6, Tailwind v4, react-router 7. One file per screen under `app/routes/`, registered from the directory; a file's name encodes its path (`.` separates segments, `$name` is a parameter: `f.$factory.versions.tsx` serves `/f/:factory/versions`, #73). |
-| `server/` | Bun + Hono: serves the built app, `/api/health`, `/api/build-id`, and the sealing API for live queries. `/api/actions` is the dashboard's two writes (PRD invariant 2: answer a paused run's question, resume a run) through the factory's own Archon CLI, recorded in `mc.actions`; no other code writes to a factory, which `server/write-paths.test.ts` proves. `/api/manager/*` is the Manager: a streaming chat and a daily briefing from a Claude agent with read-only tools. At start on a `check-*` branch it loads the factories file it serves into `mc.factories`, as `migrate -- --configured-factories` does, and fails to start if that fails; it never writes `main` or a `rewind-*` branch. |
+| `server/` | Bun + Hono: serves the built app, `/api/health`, `/api/build-id`, and the live queries (a WebSocket at `/api/live/socket` and a first-paint `POST /api/live/:name`, fed by Postgres LISTEN/NOTIFY; see `db/queries/REALTIME.md`). `/api/actions` is the dashboard's two writes (PRD invariant 2: answer a paused run's question, resume a run) through the factory's own Archon CLI, recorded in `mc.actions`; no other code writes to a factory, which `server/write-paths.test.ts` proves. `/api/manager/*` is the Manager: a streaming chat and a daily briefing from a Claude agent with read-only tools. `start.sh` loads the factories file it serves into `mc.factories` before the server starts (`migrate:main -- --configured-factories`). |
 | `db/migrations/` | SQL files, applied in full-filename order by `bun run migrate`; each idempotent. A new migration is named `<UTC timestamp>_<name>.sql`, the timestamp as `YYYYMMDDTHHMMZ` (`20261109T1430Z_stop_line.sql`) and the name lowercase `a-z0-9_`, so parallel PRs cannot pick the same name; `bun run check` rejects any other new name and any shared prefix. The `00NN_` files predate this and keep their names (the runner records applied migrations by filename). A merged migration is never edited (main has applied it and never re-runs it): change it with a new migration. |
 | `db/queries/` | Every live query, one file each, named for the panel that reads it. |
-| `function/` | The Neon Function that receives GitHub webhooks (Hono, TypeScript). |
+| `function/` | The GitHub-shaped ingestion (`ingest.ts`) behind the forge seam (`forge-seam.ts`). Network ingestion from GitHub is disabled in this install: no webhook is served and the default reads are offline. |
 | `parsers/` | Pure functions: comment formats, pin trailers, DECISIONS.md, the architecture parser. |
-| `scripts/` | `fixture:branch`, `fixture:drop`, `fixture:write`, `migrate`, `backfill`, `rewind:create`, `function:deploy`, `function:idle-check`. |
+| `scripts/` | `fixture:branch`, `fixture:drop` (a check's own scratch database), `fixture:write`, `migrate`, `backfill`, `reconcile:laps`, `archon-guard.ts` (`guard:attach`, `guard:detach`, `guard:status`), `safety-test.ts`. |
 | `fixtures/` | `seed.sql`, `expected-scorecard.json`, `webhooks/` sample payloads, `pack/` (a snapshot of the pinned workflow pack), `factory-template/` (the fence files). |
 | `harness/` | `design-probe.js` and the factory harness configuration. |
 | `docs/design/archon-console/` | The Archon console's tokens and components, copied from Archon. The design source of truth. |
@@ -28,19 +28,25 @@ How this repository is built. The product is `docs/mission-control.prd.md`; this
 - Live queries read the dashboard's own tables, never Archon's `provider_event` rows.
 - A live panel's speed is judged on the app's own work (owner decision, #13/#14, revised on #137):
   its query's `EXPLAIN ANALYZE` execution under 100 ms on the seed, and its rows on screen within
-  500 ms of the first snapshot arriving (decode and render). Everything between the subscribe and
-  that first snapshot is Neon's (connection, first-subscribe warm-up, delivery) and is judged only
-  by Realtime `ready` within 2000 ms of navigation. Never show rows that did not come from a
-  delivered subscription (no `initialData`), so a panel reads `ready` only when it is live.
-- Nothing writes to Archon's tables. Triggers on them catch every error into `projection_errors`.
+  500 ms of the first snapshot arriving (decode and render). A panel reads `ready` only once rows
+  the server ran for it arrived (no `initialData`).
+- Nothing writes to Archon's tables, and nothing the dashboard installs may make an Archon write
+  fail or slow materially. The only triggers on Archon's tables are the guards
+  (`scripts/lib/archon-guard.ts`): each copies the row into a shadow table in `mc_guard` inside an
+  exception block, where the projection's own triggers run, and catches everything. `bun run
+  migrate` moves any trigger a migration puts on an Archon table onto its shadow; apply migrations
+  only through it. `bin/detach.sh` removes every dashboard trigger from Archon's tables;
+  `bin/attach.sh` puts the guards back. `bun scripts/safety-test.ts` proves it on a scratch database.
 - Background repairs of the dashboard's own tables run as `reconcile:laps` / `reconcile` on the
   owner's schedule (every 10 minutes on the reference install), never by the app server or the
   webhook.
-- Never connect to the `main` database branch from a check, a test or a lap. Use a `check-*` branch
-  (`bun run fixture:branch`). `scripts/` refuses any other branch name for writes.
-- Configuration by environment only: `MC_DATABASE_URL`, `NEON_REALTIME_SECRET`, `NEON_API_KEY`,
-  `NEON_PROJECT_ID`, and optionally `MC_FACTORIES_FILE` (a factories file served instead of
-  `factories.json`; checks use it to add a fixture-only factory, a real install leaves it unset)
+- Never write the live dashboard database from a check, a test or a lap. Use a `check-*` database
+  (`bun run fixture:branch` creates one on the same server and writes `.mc-check.env`;
+  `bun run fixture:drop` drops it). `scripts/` refuses any other database name for check writes.
+- Configuration by environment only: `MC_DATABASE_URL`, optionally `MC_LIVE_POLL_MS` (the live
+  layer's fallback poll, default 15000, 0 for none), `MC_OWNER_CONFIRM` (the live database's name,
+  confirming a `:main` command without a terminal; `start.sh` sets it), and `MC_FACTORIES_FILE`
+  (a factories file served instead of `factories.json`; this install's is `factories.local.json`)
   and `MC_OPERATORS_FILE` (the operator file, default `.mc-local/operators.json`, gitignored and
   written by the owner: `{"operators": {"<factory>": {...}}}`, keyed by factory name, each with `who`,
   its Archon CLI `command` as an argv array naming a real executable, an absolute `cwd` and optional
@@ -52,7 +58,8 @@ How this repository is built. The product is `docs/mission-control.prd.md`; this
   `CLAUDE_CODE_OAUTH_TOKEN`, or the machine's Claude login, set on the server. `ANTHROPIC_API_KEY`
   is optional and used only when set. With none of them the endpoint says which credential is missing.
   Never `DATABASE_URL`. Never commit a secret; `.mc-check.env` is gitignored.
-- Serve on `127.0.0.1:<port>`, open as `http://localhost:<port>`, ports 8850-8864 only.
+- Serve on `127.0.0.1:<port>`, open as `http://localhost:<port>`, ports 3092-3099 only (3092 is
+  the factory's own dashboard, `start.sh`).
 - Holdout scenario text from Archon's old rows never enters the dashboard's tables or screens. The factory no longer uses holdouts.
 - Design: dark only, Geist for text and Geist Mono for data. Copy the components from
   `docs/design/archon-console/`. Colors live in one place: the tokens in `index.css` and
@@ -87,26 +94,12 @@ How this repository is built. The product is `docs/mission-control.prd.md`; this
   the PRD's appendix and on `fixtures/pack/`.
 - Stop every process you start by its process id; never kill by name.
 
-## Deploying the webhook Function
+## GitHub ingestion and the forge seam (local-factory port)
 
-- `bun run function:deploy -- --branch <check-*|main>` bundles `function/index.ts` with neonctl
-  (pinned in devDependencies), deploys it as the Neon Function `mcwebhook` (runtime nodejs24) on
-  that branch, and prints its URL. It needs `NEON_API_KEY`, `NEON_PROJECT_ID` and
-  `GITHUB_WEBHOOK_SECRET`; `GITHUB_TOKEN` is optional and only raises GitHub's rate limit. It sets
-  the Function's `MC_DATABASE_URL` to that branch's pooled connection string, so the Function
-  writes only the branch it runs on. It refuses every branch but `check-*` and `main`; `main` is
-  the owner's step after merge (PRD 11.3). It prints no secret, though they sit in neonctl's
-  arguments while it runs.
-- `bun run function:deploy -- --branch <branch> --delete` removes it. A check that deploys deletes
-  its Function before `fixture:drop`.
-- `function/index.ts` is the deployed entry (Node, `pg`); `function/dev.ts` is the local one (Bun).
-  Both serve `createWebhookApp`.
-- Registering the webhook (the owner, once per repository, after deploying to `main`): in GitHub,
-  Settings, Webhooks, Add webhook, on each repository in `factories.json` and on
-  `coleam00/ai-software-factory`, whose pushes carry pins, verdicts and `DECISIONS.md`. Payload
-  URL: the printed URL. Content type: `application/json`. Secret: the `GITHUB_WEBHOOK_SECRET` the
-  deploy used. SSL verification on. Events, under "Let me select individual events": Issues, Issue
-  comments, Pull requests, Pushes, Labels. "Recent Deliveries" shows each answer: 200 recorded,
-  401 the secret differs, 400 the content type is not JSON.
+Upstream received GitHub webhooks in a Neon Function and backfilled from GitHub's REST API. Both
+are gone here: nothing reaches api.github.com or raw.githubusercontent.com. `function/ingest.ts`
+keeps the ingestion rules; `function/forge-seam.ts` is where the factory's local forge plugs in,
+by delivering GitHub-shaped events (`createForgeIngestion(...).deliver(event, payload)`) or by
+answering GitHub's REST paths as `Deps.github` for `bun run backfill`.
 
 See [factory workflow policy](factory/WORKFLOW_POLICY.md) for factory-specific shared-workflow requirements.

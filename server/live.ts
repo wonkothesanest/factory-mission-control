@@ -1,46 +1,39 @@
+// Live queries on the factory's own Postgres (local-factory port; Neon Realtime removed).
+//
+// The browser opens one WebSocket per tab at LIVE_SOCKET_PATH and subscribes to query files by
+// name, for a factory, with the query's arguments; it never sends SQL. The server runs each file
+// as one read-only SELECT on a read-only pool and pushes the rows (server/live-hub.ts), and runs it
+// again when a dashboard table NOTIFYs a change (server/live-listen.ts) or the fallback poll fires.
+
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createRealtime, rawSql, type SealedLiveQuery } from '@neon/realtime/server';
 import type { Hono } from 'hono';
-import { isRewindBranch } from '../scripts/lib/guard';
-import { createNeonApi, type NeonApi } from '../scripts/lib/neon';
+import pg from 'pg';
 import type { Env } from './check-env';
 import { readFactoryNames } from './factories';
-import {
-  rewindBranchNames,
-  rewindListed,
-  rewindRealtime,
-  UnknownRewindBranch,
-  UnlistedRewindBranch,
-} from './rewind';
+import { DEFAULT_POLL_MS, LiveHub, type RunQuery } from './live-hub';
+import { type ListenHandle, listenForChanges } from './live-listen';
+
+export { liveParams, parameterCount } from './live-params';
 
 export const LIVE_QUERY_NAME = /^[a-z0-9-]+$/;
 
-/** One branch's sealing: the Realtime WebSocket the browser subscribes on, and its sealer. */
-export interface Sealer {
-  url: string;
-  seal(sql: string, params: readonly string[]): Promise<SealedLiveQuery<unknown>>;
-}
+/** Where a tab opens its live socket. */
+export const LIVE_SOCKET_PATH = '/api/live/socket';
 
-export type RewindSealer = Sealer & { name: string };
-
-/** What the server needs to seal live queries; absent when the environment cannot seal. */
+/** What the server needs to serve live queries; absent when it has no database. */
 export interface Live {
-  /** The factories this server shows and seals for, from its factories file. */
+  /** The factories this server shows and serves queries for, from its factories file. */
   factories: string[];
-  /** Every file in `db/queries/` by its name without `.sql`: the only SQL the server seals. */
+  /** Every file in `db/queries/` by its name without `.sql`: the only SQL the server runs. */
   queries: Map<string, string>;
-  /** MC_DATABASE_URL's branch: sealed for until a switch, and always for a `home` panel. */
-  home: Sealer;
-  /** The rewind branch `POST /api/rewind` switched sealing to, until switched back. */
-  rewind?: RewindSealer;
-  /** Finds a listed rewind-* branch's sealing; absent without NEON_API_KEY and NEON_PROJECT_ID. */
-  openRewind?: (name: string) => Promise<RewindSealer>;
-  /** The rewind-* branches Neon has now; absent without NEON_API_KEY and NEON_PROJECT_ID. */
-  rewindBranches?: () => Promise<string[]>;
+  hub: LiveHub;
+  /** The change feed, absent in tests that drive the hub by hand. */
+  listen?: ListenHandle;
+  close(): Promise<void>;
 }
 
-/** The one directory of sealed queries, for the page, the Manager's tools and the briefing alike. */
+/** The one directory of live queries, for the page, the Manager's tools and the briefing alike. */
 export const LIVE_QUERIES_DIR = join(import.meta.dir, '..', 'db', 'queries');
 
 export function loadLiveQueries(dir: string): Map<string, string> {
@@ -54,211 +47,125 @@ export function loadLiveQueries(dir: string): Map<string, string> {
 }
 
 /**
- * Neon serves Realtime for a branch on its endpoint's host with `.rt.` after the endpoint id;
- * the Neon API's `invocation_url` for the branch is the same host.
- */
-function realtimeUrlOf(host: string): string | undefined {
-  const match = /^(ep-[a-z0-9-]+?)(?:-pooler)?\.(.+\.neon\.tech)$/.exec(host);
-  return match ? `wss://${match[1]}.rt.${match[2]}/` : undefined;
-}
-
-export function realtimeUrlFor(databaseUrl: string): string {
-  const url = realtimeUrlOf(new URL(databaseUrl).hostname);
-  if (!url) throw new Error('MC_DATABASE_URL is not a Neon endpoint');
-  return url;
-}
-
-export function realtimeUrlForHost(host: string): string {
-  const url = realtimeUrlOf(host);
-  if (!url) throw new Error(`${host} is not a Neon endpoint`);
-  return url;
-}
-
-/** Seals with `secret` for database `db`; the secret stays in the closure. */
-function sealerFor(url: string, secret: string, db: string): Sealer {
-  const realtime = createRealtime({ secret, db });
-  return { url, seal: (sql, params) => realtime.seal({ query: rawSql(sql, [...params]) }) };
-}
-
-/**
- * Opens a rewind branch's sealing through the Neon API. A branch copies its parent's databases,
- * so the rewind branch has the home branch's database `db`. Only a branch `listed` says `/rewind`
- * shows is opened.
- */
-export function rewindOpener(
-  api: NeonApi,
-  db: string,
-  listed: (name: string) => Promise<boolean>,
-): (name: string) => Promise<RewindSealer> {
-  return async (name) => {
-    const { host, secret } = await rewindRealtime(api, name, listed);
-    return { name, ...sealerFor(realtimeUrlForHost(host), secret, db) };
-  };
-}
-
-/**
- * The factories file: `MC_FACTORIES_FILE` when set (a check's own list, as `test:live` writes),
- * else the repository's factories.json. Only its names are shown and sealed for: a row of
- * `mc.factories` the file does not name is never listed, so one entry means one factory.
+ * The factories file: `MC_FACTORIES_FILE` when set (a check's own list), else the repository's
+ * factories.json. Only its names are shown and served: a row of `mc.factories` the file does not
+ * name is never listed, so one entry means one factory.
  */
 export function factoryNames(env: Env, repoRoot: string): string[] {
   return readFactoryNames(env, repoRoot);
 }
 
-export function liveFromEnv(env: Env, repoRoot: string): Live | undefined {
-  const databaseUrl = env.MC_DATABASE_URL;
-  const secret = env.NEON_REALTIME_SECRET;
-  if (!databaseUrl || !secret) return undefined;
-  const db = new URL(databaseUrl).pathname.slice(1);
-  const apiKey = env.NEON_API_KEY;
-  const projectId = env.NEON_PROJECT_ID;
-  const api = apiKey && projectId ? createNeonApi({ apiKey, projectId }) : undefined;
+/** Postgres interval has no Realtime decoding: it reaches the browser as its text, as it did. */
+const INTERVAL_OID = 1186;
+
+/**
+ * A read-only pool for live queries. node-postgres decodes values the way Neon Realtime's client
+ * did (its parsers "match node-postgres"): int8 and numeric as strings, timestamps and dates as
+ * Date, json as values.
+ */
+export function liveQueryRunner(databaseUrl: string): { run: RunQuery; end: () => Promise<void> } {
+  const pool = new pg.Pool({
+    connectionString: databaseUrl,
+    max: 4,
+    application_name: 'mission-control-live',
+    options: '-c default_transaction_read_only=on -c statement_timeout=15000',
+    types: {
+      getTypeParser: ((oid: number, format?: 'text' | 'binary') =>
+        oid === INTERVAL_OID
+          ? (value: string) => value
+          : pg.types.getTypeParser(oid, format)) as typeof pg.types.getTypeParser,
+    },
+  });
+  pool.on('error', (error) => console.error(`live query pool: ${error.message}`));
   return {
-    factories: factoryNames(env, repoRoot),
-    queries: loadLiveQueries(LIVE_QUERIES_DIR),
-    home: sealerFor(realtimeUrlFor(databaseUrl), secret, db),
-    openRewind: api ? rewindOpener(api, db, rewindListed(databaseUrl)) : undefined,
-    rewindBranches: api ? () => rewindBranchNames(api) : undefined,
+    run: async (sql, params) => (await pool.query(sql, [...params])).rows,
+    end: () => pool.end(),
   };
 }
 
-/** How many parameters `sql` takes: its highest `$n`. */
-export function parameterCount(sql: string): number {
-  return Math.max(0, ...[...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
+function pollMs(env: Env): number {
+  const raw = env.MC_LIVE_POLL_MS;
+  if (raw === undefined || raw === '') return DEFAULT_POLL_MS;
+  const ms = Number(raw);
+  if (!Number.isInteger(ms) || ms < 0)
+    throw new Error('MC_LIVE_POLL_MS must be a whole number of ms');
+  return ms;
 }
 
-/**
- * The parameters for a sealed query: the factory, then `args` (absent means none), which must be
- * strings and exactly the query's parameters after `$1`. Undefined when `args` do not fit.
- */
-export function liveParams(sql: string, factory: string, args: unknown = []): string[] | undefined {
-  if (
-    !Array.isArray(args) ||
-    !args.every((arg) => typeof arg === 'string') ||
-    args.length !== parameterCount(sql) - 1
-  ) {
-    return undefined;
-  }
-  return [factory, ...args];
+/** The live layer over `MC_DATABASE_URL`, or undefined without one. */
+export function liveFromEnv(env: Env, repoRoot: string): Live | undefined {
+  const databaseUrl = env.MC_DATABASE_URL;
+  if (!databaseUrl) return undefined;
+  const runner = liveQueryRunner(databaseUrl);
+  const hub = new LiveHub({
+    run: runner.run,
+    queries: loadLiveQueries(LIVE_QUERIES_DIR),
+    factories: factoryNames(env, repoRoot),
+    pollMs: pollMs(env),
+  });
+  hub.start();
+  const listen = listenForChanges(databaseUrl, () => hub.changed());
+  return {
+    factories: factoryNames(env, repoRoot),
+    queries: loadLiveQueries(LIVE_QUERIES_DIR),
+    hub,
+    listen,
+    async close() {
+      hub.stop();
+      await listen.stop();
+      await runner.end();
+    },
+  };
 }
 
 /** What `GET /api/live` answers and the page's boot script carries: no secret, no connection string. */
 export function liveConfig(live: Live) {
-  return {
-    /** The Realtime WebSocket every panel subscribes on, the rewind branch's while switched. */
-    url: (live.rewind ?? live.home).url,
-    /** The home branch's, for the panels that always read it. */
-    home: live.home.url,
-    factories: live.factories,
-    rewind: live.rewind?.name ?? null,
-  };
+  return { factories: live.factories, socket: LIVE_SOCKET_PATH };
 }
 
 export type LiveConfig = ReturnType<typeof liveConfig>;
 
 const NOT_CONFIGURED = { error: 'live queries are not configured' };
 
-function field(body: unknown, key: string): unknown {
-  return typeof body === 'object' && body !== null && key in body
-    ? (body as Record<string, unknown>)[key]
-    : undefined;
-}
-
-/**
- * The browser names a query file, a factory, and `args` for a query's parameters after `$1`; it
- * never sends SQL. Sealing follows the rewind branch `POST /api/rewind` switched to, except for a
- * panel that asks for `branch: 'home'`. The answer names the rewind branch it was sealed for (null
- * for home), so an open page can tell that the server switched since it loaded.
- */
 export function liveRoutes(app: Hono, live: Live | undefined): void {
   app.get('/api/live', (c) => {
     if (!live) return c.json(NOT_CONFIGURED, 503);
-    return c.json(liveConfig(live));
+    return c.json({
+      ...liveConfig(live),
+      listening: live.listen?.connected() ?? false,
+      subscribed: live.hub.size,
+    });
   });
 
+  // A query's rows once, for a page's first paint while its socket opens. The browser names a
+  // query file, a factory and the query's arguments after $1; it never sends SQL.
   app.post('/api/live/:name', async (c) => {
     if (!live) return c.json(NOT_CONFIGURED, 503);
-    const sql = live.queries.get(c.req.param('name'));
-    if (sql === undefined) return c.json({ error: 'unknown live query' }, 404);
     const body: unknown = await c.req.json().catch(() => undefined);
-    const factory = field(body, 'factory');
-    if (typeof factory !== 'string' || !live.factories.includes(factory)) {
-      return c.json({ error: 'unknown factory' }, 400);
+    const field = (key: string) =>
+      typeof body === 'object' && body !== null
+        ? (body as Record<string, unknown>)[key]
+        : undefined;
+    const factory = field('factory');
+    if (typeof factory !== 'string') return c.json({ error: 'unknown factory' }, 400);
+    const answer = await live.hub.snapshot({
+      query: c.req.param('name'),
+      factory,
+      args: field('args'),
+    });
+    if ('refused' in answer) {
+      return c.json({ error: answer.refused }, answer.refused === 'unknown live query' ? 404 : 400);
     }
-    const params = liveParams(sql, factory, field(body, 'args'));
-    if (!params) return c.json({ error: 'wrong arguments for this query' }, 400);
-    const branch = field(body, 'branch');
-    if (branch !== undefined && branch !== 'home') return c.json({ error: 'unknown branch' }, 400);
-    const rewind = branch === 'home' ? undefined : live.rewind;
-    const sealed = await (rewind ?? live.home).seal(sql, params);
-    return c.json({ ...sealed, rewind: rewind?.name ?? null });
-  });
-
-  // The rewind-* branches that exist, so `/rewind` offers no switch to a listed one Neon lost.
-  app.get('/api/rewind/branches', async (c) => {
-    if (!live) return c.json(NOT_CONFIGURED, 503);
-    if (!live.rewindBranches) {
-      return c.json({ error: 'needs NEON_API_KEY and NEON_PROJECT_ID on the server' }, 503);
-    }
-    try {
-      return c.json({ branches: await live.rewindBranches() });
-    } catch (error) {
-      console.error(
-        `listing rewind branches failed: ${error instanceof Error ? error.message : error}`,
-      );
-      return c.json({ error: 'could not list the rewind branches' }, 502);
-    }
-  });
-
-  // `{ branch: "rewind-..." }` switches every page's sealing to that branch; `{ branch: null }` back.
-  app.post('/api/rewind', async (c) => {
-    if (!live) return c.json(NOT_CONFIGURED, 503);
-    const branch = field(await c.req.json().catch(() => undefined), 'branch');
-    if (branch === null) {
-      live.rewind = undefined;
-      return c.json({ rewind: null });
-    }
-    if (typeof branch !== 'string' || !isRewindBranch(branch)) {
-      return c.json({ error: 'not a rewind-* branch' }, 400);
-    }
-    if (!live.openRewind) {
-      return c.json(
-        { error: 'switching needs NEON_API_KEY and NEON_PROJECT_ID on the server' },
-        503,
-      );
-    }
-    try {
-      live.rewind = await live.openRewind(branch);
-    } catch (error) {
-      if (error instanceof UnknownRewindBranch || error instanceof UnlistedRewindBranch) {
-        return c.json({ error: error.message }, 404);
-      }
-      // The Neon API's answer stays in the server's log: the browser gets no upstream text.
-      console.error(`opening ${branch} failed: ${error instanceof Error ? error.message : error}`);
-      return c.json({ error: `could not open ${branch}` }, 502);
-    }
-    return c.json({ rewind: branch });
+    if ('failed' in answer) return c.json({ error: answer.failed }, 502);
+    return c.body(`{"rows":${answer.rows}}`, 200, { 'content-type': 'application/json' });
   });
 }
 
-/** The WebSocket subprotocol `@neon/realtime`'s client asks for (`neon.realtime.v1`). */
-export const REALTIME_PROTOCOL = 'neon.realtime.v1';
-
 /**
- * An inline script for `index.html`: it hands the browser what `GET /api/live` answers and opens
- * the Realtime WebSocket while the page is still parsing, buffering what Realtime sends until the
- * app's client takes the socket over (app/live/early-socket.ts). Opening the connection is most of
- * a panel's wait for its first rows; this way it runs while the app's bundle loads.
+ * An inline script for `index.html`: it hands the browser what `GET /api/live` answers, so the
+ * app opens its socket without asking first.
  */
 export function liveBootScript(config: LiveConfig): string {
-  const boot = JSON.stringify({ ...config, protocol: REALTIME_PROTOCOL }).replace(/</g, '\\u003c');
-  return (
-    "<script>(function(c){try{var r=0;performance.mark('live:connection:start');" +
-    'var s=new WebSocket(c.url,c.protocol);c.socket=s;c.early=[];' +
-    "s.addEventListener('open',function(){performance.mark('live:connection:open')});" +
-    "s.addEventListener('message',function(e){if(!r)try{if(JSON.parse(e.data).type==='ready'){" +
-    "r=1;performance.mark('live:connection:ready')}}catch(x){}if(c.early)c.early.push(e.data)})" +
-    '}catch(e){}' +
-    `window.__MC_LIVE__=c})(${boot})</script>`
-  );
+  const boot = JSON.stringify(config).replace(/</g, '\\u003c');
+  return `<script>window.__MC_LIVE__=${boot}</script>`;
 }

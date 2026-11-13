@@ -195,7 +195,24 @@ function launchBrowser(env: Record<string, string | undefined>): Launch {
     'about:blank',
   ];
   if (process.platform === 'linux' && env.CI) args.unshift('--no-sandbox');
-  const proc = spawn(findBrowser(env), args, { stdio: 'ignore' });
+  // Chrome binds its singleton socket at $TMPDIR/com.google.Chrome.XXXXXX/SingletonSocket, and a
+  // Unix socket path is at most 107 bytes: under a deep TMPDIR (a project-local .tmp) it aborts
+  // with "Socket path too long". It gets the same directory, named relatively from inside it.
+  const deepTmp = process.platform === 'linux' && tmpdir().length > 60;
+  // local-factory port: Chrome keeps its crash reporter's database under its default
+  // configuration directory ($CHROME_CONFIG_HOME, else $XDG_CONFIG_HOME/google-chrome, else
+  // ~/.config/google-chrome), whatever --user-data-dir says. Both point at the throwaway profile,
+  // so a browser check writes nothing under the home directory.
+  const proc = spawn(findBrowser(env), args, {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      CHROME_CONFIG_HOME: profile,
+      XDG_CONFIG_HOME: profile,
+      ...(deepTmp && { TMPDIR: '.' }),
+    },
+    ...(deepTmp && { cwd: tmpdir() }),
+  });
   const exited = new Promise((done) => proc.once('exit', done));
   const stop = async () => {
     if (proc.exitCode === null) {

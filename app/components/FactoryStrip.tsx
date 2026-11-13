@@ -1,5 +1,4 @@
 import { type ReactElement, useEffect } from 'react';
-import { switchBranch } from '../lib/rewind';
 import type { PanelState } from '../live/LivePanel';
 import { LivePanel } from '../live/LivePanel';
 import { useFactory } from '../live/FactoryProvider';
@@ -11,41 +10,6 @@ export interface StatusStripRow {
   waiting: number;
   /** The Archon commit of the factory's current version, by the step screen's rule; null before any is parsed. */
   engine: string | null;
-}
-
-/**
- * Switches the server back to its home branch. A refused switch opens `/rewind`, whose own way
- * back says why.
- */
-const switchBack = () => {
-  switchBranch(null).catch(() => window.location.assign('/rewind'));
-};
-
-/**
- * Shown on every screen while the server seals for a rewind branch. It comes from the server's
- * configuration, not a live query, so it shows while the strip loads or fails.
- */
-export function RewindIndicator({ rewind }: { rewind: string | null }): ReactElement | null {
-  if (rewind === null) return null;
-  return (
-    <div data-rewind-indicator={rewind} className="border-b border-border bg-accent/[0.08]">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-4 gap-y-1 px-6 py-2">
-        <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-accent-bright">
-          Rewind
-        </span>
-        <span className="min-w-0 break-all font-mono text-[12px] text-text-primary">{rewind}</span>
-        <span className="text-[12px] text-text-secondary">read-only</span>
-        <button
-          type="button"
-          data-indicator-switch-back
-          onClick={switchBack}
-          className="ml-auto text-[12px] text-text-primary underline underline-offset-2"
-        >
-          Switch back
-        </button>
-      </div>
-    </div>
-  );
 }
 
 /**

@@ -784,24 +784,24 @@ test('the replay projects the step-level event types the live trigger projects',
 });
 
 test('--help prints usage and exits 0 without opening the database', async () => {
-  const { code, out, opened, neonCalls } = await run(['--help']);
+  const { code, out, opened, resolved } = await run(['--help']);
   expect(code).toBe(0);
   expect(out.join('\n')).toContain('usage: bun run reconcile:laps');
   expect(opened).toEqual([]);
-  expect(neonCalls).toEqual([]);
+  expect(resolved).toEqual([]);
 });
 
 test('an unknown argument exits 2 with usage before touching Neon', async () => {
-  const { code, err, neonCalls } = await run(['--force']);
+  const { code, err, resolved } = await run(['--force']);
   expect(code).toBe(2);
   expect(err.join('\n')).toContain('usage: bun run reconcile:laps');
-  expect(neonCalls).toEqual([]);
+  expect(resolved).toEqual([]);
 });
 
 test('given target branch main, reconcile:laps exits non-zero and opens nothing', async () => {
   const { code, opened, err } = await run([], 'main');
   expect(code).not.toBe(0);
-  expect(err.join('\n')).toContain(`refusing branch 'main'`);
+  expect(err.join('\n')).toContain(`refusing database 'main'`);
   expect(opened).toEqual([]);
 });
 

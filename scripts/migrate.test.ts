@@ -34,37 +34,38 @@ test.each(['main', 'fixture', 'rewind-x'])(
   async (branchName) => {
     const run = recordingDeps({ repoRoot: repo(), branchName });
     expect(await main([], run.deps)).not.toBe(0);
-    expect(run.mutatingCalls).toEqual([]);
     expect(run.opened).toEqual([]);
-    expect(run.err.join('\n')).toContain(`refusing branch '${branchName}'`);
+    expect(run.err.join('\n')).toContain(`refusing database '${branchName}'`);
   },
 );
 
-test.each([[['--help']], [['-h']]])('prints usage for %j without touching Neon', async (argv) => {
-  const run = recordingDeps({ repoRoot: repo() });
-  expect(await main(argv, run.deps)).toBe(0);
-  expect(run.out.join('\n')).toContain('usage: bun run migrate');
-  expect(run.out.join('\n')).toContain('bun run migrate -- --configured-factories');
-  expect(run.out.join('\n')).toContain('bun run migrate:main -- --configured-factories');
-  expect(run.out.join('\n')).toContain('MC_FACTORIES_FILE');
-  expect(run.out.join('\n')).toContain('MC_DATABASE_URL');
-  expect(run.out.join('\n')).toContain('NEON_API_KEY and NEON_PROJECT_ID');
-  expect(run.out.join('\n')).toContain('Rewind branches are read-only');
-  expect(run.neonCalls).toEqual([]);
-  expect(run.opened).toEqual([]);
-});
+test.each([[['--help']], [['-h']]])(
+  'prints usage for %j without resolving the database',
+  async (argv) => {
+    const run = recordingDeps({ repoRoot: repo() });
+    expect(await main(argv, run.deps)).toBe(0);
+    expect(run.out.join('\n')).toContain('usage: bun run migrate');
+    expect(run.out.join('\n')).toContain('bun run migrate -- --configured-factories');
+    expect(run.out.join('\n')).toContain('bun run migrate:main -- --configured-factories');
+    expect(run.out.join('\n')).toContain('MC_FACTORIES_FILE');
+    expect(run.out.join('\n')).toContain('MC_DATABASE_URL');
+    expect(run.out.join('\n')).toContain('--no-attach');
+    expect(run.resolved).toEqual([]);
+    expect(run.opened).toEqual([]);
+  },
+);
 
 test.each([[['--force']], [['main']]])(
-  'exits 2 with usage for %j before touching Neon',
+  'exits 2 with usage for %j before resolving the database',
   async (argv) => {
     const run = recordingDeps({ repoRoot: repo() });
     expect(await main(argv, run.deps)).toBe(2);
     expect(run.err.join('\n')).toContain('usage: bun run migrate');
-    expect(run.neonCalls).toEqual([]);
+    expect(run.resolved).toEqual([]);
   },
 );
 
-test('migrate:main refuses every branch but main, check-* included', async () => {
+test('migrate:main refuses a check-* database', async () => {
   const run = recordingDeps({ repoRoot: repo(), branchName: 'check-abc', owner: true });
   expect(await main(['--main'], run.deps)).not.toBe(0);
   expect(run.opened).toEqual([]);
@@ -240,19 +241,18 @@ test.each(['main', 'fixture', 'rewind-before-setup'])(
   async (branchName) => {
     const run = recordingDeps({ repoRoot: repo(), branchName });
     expect(await main(['--configured-factories'], run.deps)).toBe(1);
-    expect(run.err.join('\n')).toContain(`refusing branch '${branchName}'`);
+    expect(run.err.join('\n')).toContain(`refusing database '${branchName}'`);
     expect(run.opened).toEqual([]);
-    expect(run.mutatingCalls).toEqual([]);
   },
 );
 
-test.each(['check-abc', 'fixture', 'rewind-before-setup', 'main'])(
-  'configured main migration keeps branch and terminal authorization on %s',
+test.each(['check-abc', 'main'])(
+  'configured main migration keeps database and terminal authorization on %s',
   async (branchName) => {
     const run = recordingDeps({ repoRoot: repo(), branchName, owner: branchName !== 'main' });
     expect(await main(['--main', '--configured-factories'], run.deps)).toBe(1);
     expect(run.err.join('\n')).toContain(
-      branchName === 'main' ? 'owner, at a terminal' : `refusing branch '${branchName}'`,
+      branchName === 'main' ? 'owner, at a terminal' : `refusing database '${branchName}'`,
     );
     expect(run.opened).toEqual([]);
   },
@@ -324,8 +324,9 @@ function recordingDb(): { db: Db; statements: string[] } {
   const db: Db = {
     async query(sql, params) {
       statements.push(sql);
-      if (sql.startsWith('INSERT INTO mc_schema_migrations')) recorded.add(String(params?.[0]));
-      if (sql.startsWith('SELECT name FROM mc_schema_migrations')) {
+      if (sql.startsWith('INSERT INTO mc_meta.schema_migrations'))
+        recorded.add(String(params?.[0]));
+      if (sql.startsWith('SELECT name FROM mc_meta.schema_migrations')) {
         return [...recorded].map((name) => ({ name }));
       }
       return [];

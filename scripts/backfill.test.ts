@@ -9,6 +9,9 @@ import type { Db, Row } from './lib/db';
 import { DATABASE_URL, NOW, recordingDeps, scratchRepo } from './lib/test-deps';
 import { migrationsDir, readMigrationFiles, runMigrations } from './migrate';
 
+/** The API root GitHub's recorded answers were captured under (fixtures/github/responses.json). */
+const RECORDED_API_ROOT = 'https://api.github.com';
+
 /** GitHub's answers for every URL backfill reads, recorded as `{ link?, body }`. */
 const responses: Record<string, { link?: string; body: unknown }> = JSON.parse(
   readFileSync(join(REPO_ROOT, 'fixtures', 'github', 'responses.json'), 'utf-8'),
@@ -55,7 +58,7 @@ async function run(argv: string[], branchName = 'check-abc', fetch = recorded) {
   const recorder = recordingDeps({ repoRoot, branchName });
   const deps = {
     ...recorder.deps,
-    github: () => createGitHub(fetch),
+    github: () => createGitHub(fetch, RECORDED_API_ROOT),
     openDb: (url: string) => {
       recorder.opened.push(url);
       return { ...db, close: async () => {} };
@@ -290,7 +293,7 @@ test.each([[[]], [['--reconcile']]])(
     const before = await snapshot(db);
     const { code, opened, err } = await run(argv, 'main');
     expect(code).not.toBe(0);
-    expect(err.join('\n')).toContain(`refusing branch 'main'`);
+    expect(err.join('\n')).toContain(`refusing database 'main'`);
     expect(opened).toEqual([]);
     expect(requests).toEqual([]);
     expect(await snapshot(db)).toEqual(before);
@@ -312,10 +315,10 @@ test.each([[['--main']], [['--reconcile', '--main']]])(
 );
 
 test('an unknown argument exits 2 with usage before touching Neon', async () => {
-  const { code, err, neonCalls } = await run(['--force']);
+  const { code, err, resolved } = await run(['--force']);
   expect(code).toBe(2);
   expect(err.join('\n')).toContain('usage: bun run backfill');
-  expect(neonCalls).toEqual([]);
+  expect(resolved).toEqual([]);
 });
 
 test('no transaction is open while GitHub is asked, and each writes at most BATCH items (#260)', async () => {
@@ -331,7 +334,7 @@ test('no transaction is open while GitHub is asked, and each writes at most BATC
   const recorder = recordingDeps({ repoRoot, branchName: 'check-abc' });
   const deps = {
     ...recorder.deps,
-    github: () => createGitHub(watched),
+    github: () => createGitHub(watched, RECORDED_API_ROOT),
     openDb: (): Db => ({
       ...db,
       async transaction(fn) {

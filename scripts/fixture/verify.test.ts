@@ -45,7 +45,7 @@ test.each(['main', 'fixture', 'rewind-x'])(
     const run = recordingDeps({ repoRoot: repo(), branchName });
     expect(await main(['counts'], run.deps)).toBe(1);
     expect(run.opened).toEqual([]);
-    expect(run.err.join('\n')).toContain(`refusing branch '${branchName}'`);
+    expect(run.err.join('\n')).toContain(`refusing database '${branchName}'`);
   },
 );
 
@@ -54,7 +54,7 @@ test.each([[[]], [['seed']], [['counts', 'scorecard']]])(
   async (argv) => {
     const run = recordingDeps({ repoRoot: repo() });
     expect(await main(argv, run.deps)).toBe(2);
-    expect(run.neonCalls).toEqual([]);
+    expect(run.resolved).toEqual([]);
     expect(run.err.join('\n')).toContain('usage: bun run fixture:verify counts|scorecard');
   },
 );

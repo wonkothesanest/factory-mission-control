@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test';
-import type { RealtimeClient } from '@neon/realtime/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createMemoryRouter, RouterProvider } from 'react-router';
 import { NotFound } from './errors';
+import type { LiveClient } from './live/client';
 import { FactoryProvider } from './live/FactoryProvider';
 import { type Live, LiveContext } from './live/LiveProvider';
 import { routesFromModules } from './routing';
@@ -14,13 +14,11 @@ const routes = routesFromModules({
   './routes/f.$factory.board.tsx': { default: Page },
   './routes/f.$factory.steps.$workflow.$step.tsx': { default: Page },
 });
-const client = {} as RealtimeClient;
+const client = {} as LiveClient;
 const ready: Live = {
   status: 'ready',
   factories: ['mission-control', 'second-factory'],
   client,
-  homeClient: client,
-  rewind: null,
 };
 
 /** The app's tree as `appRoutes` builds it, over a server configuration that is already in. */

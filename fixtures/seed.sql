@@ -40074,7 +40074,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ', ARRAY['holdout-writer', 'holdout-verifier']::text[]);
-
--- A rewind `bun run rewind:create` registered whose Neon branch is gone: no branch has its
--- name, so `/rewind` shows it as gone, with no Show button, and switching to it answers 404.
-INSERT INTO mc.rewind_branches (name, parent, at, created_at) VALUES ('rewind-2026-10-24t11-00-00z', 'main', '2026-10-24T11:00:00Z', '2026-10-24T11:02:00Z');

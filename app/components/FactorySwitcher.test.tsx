@@ -110,8 +110,7 @@ const notice = (
   factories: readonly string[] | undefined,
   rows: FactorySwitcherRow[] | undefined,
   state: PanelState = 'ready',
-  rewind: string | null = null,
-) => renderToStaticMarkup(<FactorySetupNotice {...{ factories, rows, state, rewind }} />);
+) => renderToStaticMarkup(<FactorySetupNotice {...{ factories, rows, state }} />);
 
 test('a missing configured factory gets setup commands until its live registration arrives', () => {
   const html = notice(configured, registered);
@@ -121,7 +120,7 @@ test('a missing configured factory gets setup commands until its live registrati
   expect(html).toContain('bun run migrate:main -- --configured-factories');
   expect(html).toContain('on check-*');
   expect(html).toContain('the owner run');
-  expect(html).toContain('on main, using the server&#x27;s environment');
+  expect(html).toContain('on the live database, using the server&#x27;s environment');
   expect(html).not.toMatch(/<a\b|data-running|data-factory-entry/);
   expect(
     notice(configured, [...registered, { factory: 'new-factory', running: 0, is_default: false }]),
@@ -151,14 +150,6 @@ test('absent configuration or rows, zero laps and database-only factories need n
       [...registered, { factory: 'retired', running: 2, is_default: false }],
     ),
   ).toBe('');
-});
-
-test('historical absence asks to return live before deciding whether setup is needed', () => {
-  const html = notice(configured, registered, 'ready', 'rewind-before-setup');
-  expect(html).toContain('“new-factory” are absent from this read-only rewind');
-  expect(html).toContain('switch back and, if setup is still needed, run');
-  expect(html).toContain('bun run migrate -- --configured-factories');
-  expect(html).toContain('bun run migrate:main -- --configured-factories');
 });
 
 test("from a screen the entries go to that screen, and from a step's page they stay on it", () => {

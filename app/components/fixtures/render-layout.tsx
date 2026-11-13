@@ -4,39 +4,14 @@ import { Shell } from '../../Shell';
 import Attention from '../../routes/f.$factory';
 import Board from '../../routes/f.$factory.board';
 import Runs from '../../routes/f.$factory.runs';
-import { Socket } from './render-flow';
+import { FakeLiveSocket } from '../../live/fixtures/fake-socket';
 
 let current: { unmount: () => void } | undefined;
 
 /** Mounts the real shell with the real Attention, Board and Runs routes over a server with no rows. */
 export function mount(url: string) {
   current?.unmount();
-  const originalFetch = window.fetch;
-  const header = btoa(JSON.stringify({ alg: 'dir', enc: 'A256GCM', v: 1 })).replace(/=+$/, '');
-  const asked: string[] = [];
-  window.fetch = Object.assign(
-    async (input: RequestInfo | URL) => {
-      const n = asked.push(String(input).replace('/api/live/', '')) - 1;
-      return Response.json({
-        capability: `${header}..${n}.test.tag`,
-        queryFingerprint: n.toString(16).padStart(64, '0'),
-        expiresAt: Date.now() + 60_000,
-        rewind: null,
-      });
-    },
-    { preconnect: originalFetch.preconnect },
-  );
-  window.__MC_LIVE__ = {
-    url: 'wss://test/',
-    home: 'wss://test/',
-    factories: ['x'],
-    rewind: null,
-    protocol: 'neon.realtime.v1',
-    early: [JSON.stringify({ type: 'ready' })],
-    socket: new Socket(
-      (capability) => asked[Number(capability.split('.')[2])],
-    ) as unknown as WebSocket,
-  };
+  window.__MC_LIVE__ = { factories: ['x'], socket: new FakeLiveSocket(() => undefined) };
   const router = createMemoryRouter(
     [
       {
@@ -58,7 +33,6 @@ export function mount(url: string) {
     unmount() {
       root.unmount();
       container.remove();
-      window.fetch = originalFetch;
       delete window.__MC_LIVE__;
     },
   };

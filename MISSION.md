@@ -3,8 +3,8 @@
 Factory Mission Control makes the AI Software Factory visible: the factory's architecture as one
 live map, how it has evolved and why, and for every application a factory builds, the product
 document, its work and work orders, the runs working through them, how each change was tested, and what waits on
-the owner. Every panel is a live query on Neon Postgres, so the screen moves the moment an agent
-writes. The product document is `docs/mission-control.prd.md`; it decides.
+the owner. Every panel is a live query on the factory's own Postgres (LISTEN/NOTIFY pushed over a
+WebSocket; the local-factory port has no Neon), so the screen moves the moment an agent writes. The product document is `docs/mission-control.prd.md`; it decides.
 
 ## Never
 
@@ -16,9 +16,9 @@ writes. The product document is `docs/mission-control.prd.md`; it decides.
    and is counted, never raised into Archon's transaction.
 3. Never store or show a holdout scenario's title, text, steps or thresholds. The factory no longer
    uses holdouts, and Archon's old rows still hold them.
-4. Never send a secret to the browser: the Realtime secret, database URLs and GitHub tokens stay
-   on the server and in the Neon Function.
-5. Never poll. A panel that is not a live query (or derived from one) is not done.
+4. Never send a secret to the browser: database URLs and any token stay on the server.
+5. Never poll from the browser. A panel that is not a live query (or derived from one) is not
+   done. (The server's fallback re-run behind LISTEN/NOTIFY, every 15 s, is the port's one poll.)
 6. Never let the map drift from the code. Its layout and wording are the owner's, authored in
    `app/map/factory-map.json`; what each card covers is checked against the pinned code, and step
    details are parsed from it.
