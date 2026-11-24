@@ -1,5 +1,6 @@
 import { type ReactElement, useState } from 'react';
 import { Link } from 'react-router';
+import { clock, localDay, weekdayClock } from '../lib/format';
 import type { DecideRow, UnstickRow } from '../lib/attention';
 import { type BoardRow, type ItemOnBoard, itemOnBoard } from '../lib/board';
 import { bitbucketHref, forgeHref } from '../lib/forge-links';
@@ -15,6 +16,7 @@ import {
 } from '../lib/work-item';
 import { type WorkItemNote, workItemNote } from '../lib/work-item-note';
 import { AWAITED, Feed, overall, type Source } from '../live/Feed';
+import { useUnavailable } from '../live/LiveProvider';
 import type { HomeMapRow } from '../map/live';
 import { EmptyState } from './EmptyState';
 import { useActionPending, useActionsEnabled, useStartAction } from './ActionToast';
@@ -25,14 +27,9 @@ import { Pill } from './ui/StateDot';
 import { Timeline, TimelineRow } from './ui/Timeline';
 import { Column } from './Column';
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const clock = (at: Date) => at.toISOString().slice(11, 16);
-
-/** The weekday and time on the first row and wherever the UTC day changes, else the time alone. */
+/** The weekday and time on the first row and wherever the local day changes, else the time alone. */
 function whenOf(at: Date, before: Date | null): string {
-  const newDay =
-    before === null || before.toISOString().slice(0, 10) !== at.toISOString().slice(0, 10);
-  return newDay ? `${WEEKDAYS[at.getUTCDay()]} ${clock(at)}` : clock(at);
+  return before === null || localDay(before) !== localDay(at) ? weekdayClock(at) : clock(at);
 }
 
 export function NoWorkItem({ number }: { number: string }): ReactElement {
@@ -227,6 +224,7 @@ export function WorkItem({
   factory: string | undefined;
   number: string;
 }): ReactElement {
+  const unavailable = useUnavailable();
   const [item, setItem] = useState<Source<WorkItemRow>>(AWAITED);
   const [board, setBoard] = useState<Source<BoardRow>>(AWAITED);
   const [map, setMap] = useState<Source<HomeMapRow>>(AWAITED);
@@ -267,7 +265,7 @@ export function WorkItem({
       <Feed<UnstickRow> query="unstick" factory={factory} into={setStuck} />
       <Feed<DecideRow> query="decide" factory={factory} into={setDecide} />
       {state === 'error' ? (
-        <EmptyState title="Live data is unavailable." />
+        <EmptyState title={unavailable} />
       ) : !ready || item.rows === undefined ? (
         <EmptyState title="Loading the work item." />
       ) : header === null ? (

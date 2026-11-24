@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { attentionItems, type DecideRow, recommendationReason } from '../../app/lib/attention';
 import { decideCards } from '../../app/lib/attention-page';
+import type { HomeMapRow } from '../../app/map/live';
 import type { Db } from '../../scripts/lib/db';
 import { onTheSeed, queries } from './test-seed';
 
@@ -60,11 +61,13 @@ describe('the decide query on the seed', () => {
     const rows = (await db.query(DECIDE, ['mission-control'])) as unknown as DecideRow[];
     const cards = decideCards(rows, 'mission-control');
     const merge = cards.find((c) => c.title.startsWith('#16:'));
-    expect(merge?.note).toMatchObject({
-      lead: 'Recommends Merge it now.',
-      rest: 'Nothing in it waits on another change.',
+    expect(merge?.note.lead).toContain('#16 “The owner queue” waits at');
+    expect(merge?.note.lead).toEndWith('Recommends Merge it now.');
+    expect(merge?.note.rest).toBe('Nothing in it waits on another change.');
+    expect(merge?.tiles[0]?.id).toBe('merge');
+    expect(merge?.tiles.find((t) => t.id === 'merge')?.act?.request).toMatchObject({
+      option: 'merge',
     });
-    expect(merge?.tiles.find((t) => t.id === 'merge')?.answer?.request.option).toBe('merge');
     const build = cards.find((c) => c.title.startsWith('#15:'));
     expect(build?.note.rest).toBe(
       recommendationReason(rows.find((r) => r.item_number === 15)?.message ?? ''),
@@ -81,5 +84,43 @@ describe('the decide query on the seed', () => {
       confidence: null,
       options: [],
     });
+  });
+
+  test("a paused loop run's question carries the steps it was running and sits under build", async () => {
+    const runId = '5eed0003-0000-4000-8000-00000000000a';
+    const homeMap = queries.find(([n]) => n === 'home-map')?.[1] as string;
+    await db.query('BEGIN');
+    try {
+      await db.query(
+        `UPDATE remote_agent_workflow_runs
+           SET status = 'paused',
+               metadata = metadata || jsonb_build_object('wait',
+                 jsonb_build_object('kind', 'attention', 'message', 'Fixture question',
+                   'nodeId', 'ask', 'waitingSince', now()))
+         WHERE id = $1`,
+        [runId],
+      );
+      const rows = (await db.query(DECIDE, ['mission-control'])) as unknown as DecideRow[];
+      const mine = rows.filter((r) => r.run_id === runId);
+      expect(mine).toHaveLength(1);
+      expect(mine[0]?.steps).toEqual(['build']);
+      const waiting = (
+        (await db.query(homeMap, ['mission-control', ''])) as unknown as HomeMapRow[]
+      ).filter((r) => r.kind === 'waiting' && r.run_id === runId);
+      expect(mine[0]?.steps).toEqual(waiting[0]?.steps ?? null);
+      expect(decideCards(mine, 'mission-control')[0]?.queue).toBe('build');
+    } finally {
+      await db.query('ROLLBACK');
+    }
+  });
+
+  test('names the item a wait is about from the mirrored issue, and has none for a wait about no item', async () => {
+    const seeded = (await db.query(DECIDE, ['mission-control'])) as unknown as DecideRow[];
+    expect(seeded.map((r) => [r.item_number, r.item_title])).toEqual([
+      [15, 'Lanes and recent laps'],
+      [16, 'The owner queue'],
+    ]);
+    const queue = (await db.query(DECIDE, ['queue-factory'])) as unknown as DecideRow[];
+    expect(queue.map((r) => [r.item_number, r.item_title])).toEqual([[null, null]]);
   });
 });

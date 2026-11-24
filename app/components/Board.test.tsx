@@ -1,36 +1,42 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createMemoryRouter, RouterProvider } from 'react-router';
-import { type BoardView, COLUMNS, MINI_CARDS, PIPELINE } from '../lib/board';
+import { type BoardView, COLUMNS, PIPELINE, type WorkItem } from '../lib/board';
 import { BoardBody } from './Board';
 
 const longTitle = '.archon/workflows/factory-build-queue-with-an-unbroken-path-token.yaml';
 
 const longChip = 'factory-build-queue-with-an-unbroken-order-name-token';
 
+const bare = {
+  round: 0,
+  dots: [],
+  run: null,
+  returned: 0,
+  mergedAt: null,
+  stop: null,
+  waits: null,
+};
+
 const empty: BoardView = {
   orders: [],
   columns: COLUMNS.map((c) => ({ ...c, items: [] })),
-  pipeline: PIPELINE.map(({ columns: _, ...spec }) => ({ ...spec, items: [], pills: [] })),
+  pipeline: PIPELINE.map((spec) => ({ ...spec, items: [], pills: [] })),
   found: { filed: 0, tracked: 0, dropped: 0 },
   notInOrder: 0,
   older: 0,
   olderHref: null,
 };
 
-function render(view: BoardView, mode: 'pipeline' | 'table'): string {
+function render(
+  view: BoardView,
+  mode: 'pipeline' | 'table',
+  selected: string | null = null,
+): string {
   const router = createMemoryRouter([
     {
       path: '/',
-      element: (
-        <BoardBody
-          view={view}
-          mode={mode}
-          order={null}
-          onOrder={() => {}}
-          tableHref="?view=table"
-        />
-      ),
+      element: <BoardBody view={view} mode={mode} order={selected} onOrder={() => {}} />,
     },
   ]);
   return renderToStaticMarkup(<RouterProvider router={router} />);
@@ -48,6 +54,7 @@ test('a card title and an order chip with long unbroken tokens wrap inside their
           holder: 'test',
           items: [
             {
+              ...bare,
               number: 441,
               title: longTitle,
               chips: [{ kind: 'order', text: longChip }],
@@ -86,6 +93,7 @@ test('a failed chip renders the v3 failed color and a running chip pulses', () =
           holder: 'test',
           items: [
             {
+              ...bare,
               number: 1,
               title: 'x',
               chips: [
@@ -108,8 +116,8 @@ test('a failed chip renders the v3 failed color and a running chip pulses', () =
 
 const stage = (id: string, numbers: number[]) => ({
   ...(PIPELINE.find((h) => h.id === id) as (typeof PIPELINE)[number]),
-  columns: undefined,
   items: numbers.map((number) => ({
+    ...bare,
     number,
     title: `Item ${number}`,
     chips: [],
@@ -122,14 +130,23 @@ const stage = (id: string, numbers: number[]) => ({
       : [],
 });
 
-test('the Pipeline renders the five stages in order, then Blocked and parked, each with its count and a link to the work item', () => {
+test('the Pipeline renders the seven stages in order, then Blocked and parked, each with its count and a link to the work item', () => {
   const view: BoardView = {
     ...empty,
     pipeline: PIPELINE.map((h) => stage(h.id, h.id === 'build' ? [7] : [])),
   };
   const html = render(view, 'pipeline');
   const ids = [...html.matchAll(/data-board-stage="(\w+)"/g)].map((m) => m[1]);
-  expect(ids).toEqual(['intake', 'planned', 'build', 'merge', 'merged', 'blocked']);
+  expect(ids).toEqual([
+    'intake',
+    'planned',
+    'build',
+    'review',
+    'app',
+    'merge',
+    'merged',
+    'blocked',
+  ]);
   expect(html).toContain('data-count="1"');
   expect(html).toMatch(
     /<a[^>]*href="\/f\/x\/work\/7"[^>]*data-work-item="7"|data-work-item="7"[^>]*href="\/f\/x\/work\/7"/,
@@ -137,28 +154,31 @@ test('the Pipeline renders the five stages in order, then Blocked and parked, ea
   expect(html).toContain('data-found');
 });
 
-test('the Pipeline shows at most three mini cards and a more-in-Table link', () => {
-  const numbers = Array.from({ length: MINI_CARDS + 2 }, (_, i) => i + 1);
+test('a Pipeline column shows every item it holds, and the stage row scrolls inside the Board', () => {
+  const numbers = Array.from({ length: 12 }, (_, i) => i + 1);
   const view: BoardView = {
     ...empty,
     pipeline: PIPELINE.map((h) => stage(h.id, h.id === 'build' ? numbers : [])),
   };
   const html = render(view, 'pipeline');
-  expect(html.match(/data-work-item=/g)).toHaveLength(MINI_CARDS);
-  expect(html).toContain('data-count="5"');
-  expect(html).toMatch(/href="\/\?view=table"[^>]*>2 more in Table/);
+  expect(html.match(/data-work-item=/g)).toHaveLength(numbers.length);
+  expect(html).toContain('data-count="12"');
+  expect(html).not.toContain('more in Table');
+  expect(html).toMatch(/data-stage-row[^>]*class="[^"]*overflow-x-auto/);
+  expect(html).toContain('auto-cols-[minmax(150px,1fr)]');
 });
 
 test('a mini card moves its state pill under the number instead of breaking it', () => {
   const html = render(
     {
       ...empty,
-      pipeline: PIPELINE.map(({ columns: _, ...spec }, i) => ({
+      pipeline: PIPELINE.map((spec, i) => ({
         ...spec,
         items:
           i === 0
             ? [
                 {
+                  ...bare,
                   number: 7,
                   title: 't',
                   status: 'check failed' as const,
@@ -189,4 +209,261 @@ test('a stage summary pill truncates on one line and carries its full text in a 
     'pipeline',
   );
   expect(html).toMatch(/title="check failed 1"[^>]*><span class="truncate">check failed/);
+});
+
+const card = (over: Partial<WorkItem>): WorkItem => ({
+  ...bare,
+  number: 648,
+  title: 'Build the thing',
+  chips: [],
+  to: '/f/x/work/648',
+  ...over,
+});
+
+const inMerged = (item: WorkItem) =>
+  render(
+    { ...empty, columns: [{ id: 'merged', title: 'Merged', holder: 'done', items: [item] }] },
+    'table',
+  );
+
+const dot = (state: 'done' | 'needs-you' | 'idle' | 'running', title = 't') => ({ state, title });
+
+test('a finished item shows its round, one dot per round in order, and returned', () => {
+  const html = inMerged(
+    card({
+      round: 5,
+      dots: [dot('done'), dot('needs-you'), dot('idle'), dot('done'), dot('done')],
+      returned: 3,
+    }),
+  );
+  expect(html).toContain('round 5');
+  expect([...html.matchAll(/data-round-dot="([\w-]+)"/g)].map((m) => m[1])).toEqual([
+    'done',
+    'needs-you',
+    'idle',
+    'done',
+    'done',
+  ]);
+  expect(html).toMatch(/<a [^>]*href="\/f\/x\/work\/648"[^>]*>returned ×3<\/a>/);
+});
+
+test('a running item shows the live dot and its workflow and step linking to the run', () => {
+  const html = inMerged(
+    card({
+      round: 6,
+      dots: [dot('running', 'Round 6: running')],
+      run: { workflow: 'archon-build-queue', step: 'review__code', to: '/f/x/runs/abc' },
+    }),
+  );
+  expect(html).toContain('round 6');
+  expect(html).toContain('data-round-dot="running"');
+  expect(html).toContain('title="archon-build-queue · review__code"');
+  expect(html).toContain('href="/f/x/runs/abc"');
+  expect(html).toMatch(/data-run-workflow[^>]*>archon-build-queue<\/span>/);
+  expect(html).toMatch(/data-run-step[^>]*>review__code<\/span>/);
+  expect(html).not.toContain('returned');
+});
+
+test('a running item between steps shows only its workflow, titled with the bare workflow', () => {
+  const html = inMerged(
+    card({
+      round: 1,
+      dots: [dot('running', 'Round 1: running')],
+      run: { workflow: 'archon-build-queue', step: null, to: '/f/x/runs/abc' },
+    }),
+  );
+  expect(html).toContain('title="archon-build-queue"');
+  expect(html).toMatch(/data-run-workflow[^>]*>archon-build-queue<\/span>/);
+  expect(html).not.toContain('data-run-step');
+  expect(html).not.toContain('null');
+});
+
+test('a merged item shows when it merged, and an asking item its stop line', () => {
+  const merged = inMerged(card({ mergedAt: new Date(2026, 10, 12, 9, 7) }));
+  expect(merged).toContain('merged 2026-11-12 09:07');
+  const asking = inMerged(card({ stop: { text: 'Waiting on you', state: 'needs-you' } }));
+  expect(asking).toMatch(/data-stop-line[^>]*>Waiting on you</);
+});
+
+test('a Pipeline card shows round, run, returned, merged and stop line below its title, in the design order', () => {
+  const full = {
+    ...card({
+      round: 2,
+      dots: [dot('done'), dot('running')],
+      run: { workflow: 'archon-build-queue', step: 'review__code', to: '/f/x/runs/abc' },
+      returned: 2,
+      mergedAt: new Date(2026, 10, 12, 9, 7),
+      stop: { text: 'Asking: Merge it?', state: 'needs-you' },
+    }),
+    status: 'needs you' as const,
+  };
+  const spec = PIPELINE.find((h) => h.id === 'merged') as (typeof PIPELINE)[number];
+  const html = render({ ...empty, pipeline: [{ ...spec, items: [full], pills: [] }] }, 'pipeline');
+  const at = [
+    'Build the thing',
+    'round 2',
+    'review__code',
+    'returned ×2',
+    'merged 2026-11-12',
+    'Asking: Merge it?',
+  ].map((text) => html.indexOf(text));
+  expect(at.every((i) => i >= 0)).toBe(true);
+  expect(at).toEqual([...at].sort((a, b) => a - b));
+  expect(html).toContain('title="archon-build-queue · review__code"');
+  expect(html).toContain('href="/f/x/runs/abc"');
+  expect(html).toMatch(/<a [^>]*href="\/f\/x\/work\/648"[^>]*>returned ×2<\/a>/);
+});
+
+test('a blocked card and its Table row say what the item waits on', () => {
+  const reason = { kind: 'reason' as const, text: 'Held by the 11/09 ruling' };
+  const blockers = {
+    kind: 'blockers' as const,
+    items: [
+      { number: 3, to: '/f/x/work/3' },
+      { number: 9, to: '/f/x/work/9' },
+    ],
+  };
+  const cards = (waits: WorkItem['waits']) =>
+    render(
+      {
+        ...empty,
+        pipeline: PIPELINE.map((spec) => ({
+          ...spec,
+          items: spec.id === 'blocked' ? [{ ...card({ waits }), status: 'blocked' as const }] : [],
+          pills: [],
+        })),
+      },
+      'pipeline',
+    );
+  const html = cards(reason);
+  expect(html).toContain('title="Held by the 11/09 ruling"');
+  expect(cards({ kind: 'contract' })).toContain('Needs a contract');
+  const linked = cards(blockers);
+  expect(linked).toMatch(/Blocked on <a [^>]*href="\/f\/x\/work\/3"[^>]*>#3<\/a>/);
+  expect(linked).toMatch(/href="\/f\/x\/work\/9"/);
+  const table = render(
+    {
+      ...empty,
+      columns: [
+        {
+          id: 'parked',
+          title: 'Parked',
+          holder: 'x',
+          items: [card({ waits: { kind: 'contract' } })],
+        },
+      ],
+    },
+    'table',
+  );
+  expect(table).toContain('Needs a contract');
+  const row = render(
+    {
+      ...empty,
+      columns: [{ id: 'parked', title: 'Parked', holder: 'x', items: [card({ waits: blockers })] }],
+    },
+    'table',
+  );
+  expect(row).toMatch(/Blocked on <a [^>]*href="\/f\/x\/work\/3"[^>]*>#3<\/a>/);
+});
+
+const order = (name: string, done: number, total: number) => ({
+  name,
+  done,
+  total,
+  landsOn: null,
+  building: 0,
+  needsYou: 0,
+});
+
+test('finished orders fold into one row and only open orders get a card', () => {
+  const html = render(
+    { ...empty, orders: [order('live', 1, 3), order('old-a', 8, 8), order('old-b', 4, 4)] },
+    'pipeline',
+  );
+  expect(html).toContain('data-work-order="live"');
+  expect(html).not.toContain('data-work-order="old-a"');
+  expect(html).toContain('2 finished orders: old-a, old-b');
+});
+
+test('with no open order the finished row shows alone', () => {
+  const html = render({ ...empty, orders: [order('old-a', 8, 8)] }, 'pipeline');
+  expect(html).not.toContain('data-work-order=');
+  expect(html).toContain('1 finished order: old-a');
+});
+
+test('a finished order named by ?order= keeps its card while the row is folded', () => {
+  const html = render(
+    { ...empty, orders: [order('live', 1, 3), order('old-a', 8, 8), order('old-b', 4, 4)] },
+    'pipeline',
+    'old-b',
+  );
+  expect(html).toContain('data-work-order="old-b"');
+  expect(html).not.toContain('data-work-order="old-a"');
+  expect(html).toContain('2 finished orders: old-a, old-b');
+});
+
+test('the order ?order= selects is raised with a stronger edge than a hovered card', () => {
+  const html = render({ ...empty, orders: [order('a', 1, 3), order('b', 1, 3)] }, 'pipeline', 'a');
+  const button = (name: string) =>
+    html.match(new RegExp(`<button[^>]*data-work-order="${name}"[^>]*>`))?.[0] ?? '';
+  const selected = button('a');
+  const other = button('b');
+  expect(selected).toContain('aria-pressed="true"');
+  expect(selected).toContain('bg-[var(--v3-raised)]');
+  expect(selected).toContain('border-[color:var(--v3-fg-3)]');
+  expect(selected).not.toContain('hover:');
+  expect(other).toContain('aria-pressed="false"');
+  expect(other).toContain('bg-[var(--v3-panel)]');
+  expect(other).toContain('border-[color:var(--v3-line)]');
+  expect(other).toContain('hover:border-[color:var(--v3-line-2)]');
+  const target = (name: string) =>
+    html.match(
+      new RegExp(`data-work-order="${name}".*?<span data-order-target="true" class="([^"]*)"`),
+    )?.[1] ?? '';
+  expect(target('a')).toContain('text-[color:var(--v3-fg-2)]');
+  expect(target('a')).not.toContain('--v3-fg-3');
+  expect(target('b')).toContain('text-[color:var(--v3-fg-3)]');
+});
+
+const openRow = (): void => {
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: { getItem: () => 'open' },
+    configurable: true,
+  });
+};
+
+afterEach(() => {
+  Reflect.deleteProperty(globalThis, 'localStorage');
+});
+
+test('blocked storage leaves the finished row folded instead of throwing', () => {
+  Object.defineProperty(globalThis, 'localStorage', {
+    get: () => {
+      throw new Error('blocked');
+    },
+    configurable: true,
+  });
+  const html = render(
+    { ...empty, orders: [order('live', 1, 3), order('old-a', 8, 8)] },
+    'pipeline',
+  );
+  expect(html).toContain('aria-expanded="false"');
+});
+
+test('a remembered open row shows every finished card after the row, a selected one once', () => {
+  openRow();
+  const view = {
+    ...empty,
+    orders: [order('live', 1, 3), order('old-a', 8, 8), order('old-b', 4, 4)],
+  };
+  for (const selected of [undefined, 'old-b']) {
+    const html = render(view, 'pipeline', selected);
+    const row = html.indexOf('data-finished-orders');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html.indexOf('data-work-order="live"')).toBeLessThan(row);
+    for (const name of ['old-a', 'old-b']) {
+      expect(html.split(`data-work-order="${name}"`)).toHaveLength(2);
+      expect(html.indexOf(`data-work-order="${name}"`)).toBeGreaterThan(row);
+    }
+  }
 });

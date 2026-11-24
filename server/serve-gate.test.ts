@@ -7,7 +7,7 @@ const req = (host: string, init: { method?: string; origin?: string } = {}) =>
     headers: { host, ...(init.origin ? { origin: init.origin } : {}) },
   });
 
-describe('localRequestRefusal (NET-02)', () => {
+describe('localRequestRefusal (local-only request gate)', () => {
   test('loopback hosts on the own port are served', () => {
     expect(localRequestRefusal(req('127.0.0.1:3092'), 3092)).toBeNull();
     expect(localRequestRefusal(req('localhost:3092'), 3092)).toBeNull();
@@ -18,9 +18,21 @@ describe('localRequestRefusal (NET-02)', () => {
     expect(localRequestRefusal(req('127.0.0.1:3090'), 3092)).toBe('host not allowed');
   });
   test('cross-origin state changes are refused; same-origin and origin-less ones pass', () => {
-    expect(localRequestRefusal(req('127.0.0.1:3092', { method: 'POST', origin: 'http://evil.example' }), 3092)).toBe('origin not allowed');
-    expect(localRequestRefusal(req('127.0.0.1:3092', { method: 'POST', origin: 'null' }), 3092)).toBe('origin not allowed');
-    expect(localRequestRefusal(req('127.0.0.1:3092', { method: 'POST', origin: 'http://127.0.0.1:3092' }), 3092)).toBeNull();
+    expect(
+      localRequestRefusal(
+        req('127.0.0.1:3092', { method: 'POST', origin: 'http://evil.example' }),
+        3092,
+      ),
+    ).toBe('origin not allowed');
+    expect(
+      localRequestRefusal(req('127.0.0.1:3092', { method: 'POST', origin: 'null' }), 3092),
+    ).toBe('origin not allowed');
+    expect(
+      localRequestRefusal(
+        req('127.0.0.1:3092', { method: 'POST', origin: 'http://127.0.0.1:3092' }),
+        3092,
+      ),
+    ).toBeNull();
     expect(localRequestRefusal(req('127.0.0.1:3092', { method: 'POST' }), 3092)).toBeNull();
   });
 });

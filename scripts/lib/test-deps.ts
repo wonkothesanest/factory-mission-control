@@ -6,6 +6,7 @@ import { CHECK_ENV_FILE, type Env } from '../../server/check-env';
 import type { RunStatus } from './archon-run';
 import type { Deps } from './cli';
 import type { Db, Row } from './db';
+import type { TakePassLock } from './pass-lock';
 
 /** A root no request can reach: the fake GitHub below answers nothing. */
 const UNREACHABLE_ROOT = 'http://forge.invalid';
@@ -18,6 +19,17 @@ export function hoursAgo(hours: number): string {
 
 /** A connection string the fake resolves to `branchName`'s database (local-factory port). */
 export const DATABASE_URL = 'postgresql://u:p@127.0.0.1:55432/factory';
+
+/** An in-memory pass lock: undefined while `job` on `url` is held, until its `release`. */
+export function memoryPassLock(): TakePassLock {
+  const held = new Set<string>();
+  return async (url, job) => {
+    const key = `${url}\n${job}`;
+    if (held.has(key)) return undefined;
+    held.add(key);
+    return { release: async () => void held.delete(key) };
+  };
+}
 
 export type Recorder = {
   deps: Deps;
@@ -64,6 +76,8 @@ export function recordingDeps(options: {
   fetch?: GetFetch;
   /** Answers `deps.runStatus`; without it Archon cannot be asked, so no run is ever judged ended. */
   runStatus?: (run: string) => RunStatus;
+  /** The single-pass lock; defaults to a fresh `memoryPassLock()`. */
+  passLock?: TakePassLock;
 }): Recorder {
   const recorder: Omit<Recorder, 'deps'> = {
     resolved: [],
@@ -100,6 +114,7 @@ export function recordingDeps(options: {
         recorder.githubCalls.push(url);
         throw new Error(`fake GitHub: no response for ${url}`);
       }, UNREACHABLE_ROOT),
+    passLock: options.passLock ?? memoryPassLock(),
     openDb: (url) => {
       recorder.opened.push(url);
       return db;

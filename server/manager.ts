@@ -11,19 +11,24 @@ import {
 import type { Server } from 'bun';
 import type { Context, Hono } from 'hono';
 import { isAnswerText, resolveAnswer } from '../app/lib/attention';
-import {
-  ATTENTION_SOURCES,
-  type AttentionKind,
-  KINDS,
-  sourceArgs,
-} from '../app/lib/attention-page';
-import { scorecardUntil, TOO_FEW_BELOW } from '../app/lib/factory-scorecard';
-import { failuresSince } from '../app/lib/failures';
+import { ATTENTION_SOURCES, type AttentionKind, KINDS } from '../app/lib/attention-page';
+import { scorecardEdges, TOO_FEW_BELOW } from '../app/lib/factory-scorecard';
+import { FAILURES_QUERY, failureLabel, retriedArgs } from '../app/lib/failure-view';
+import { type FailureGroupRow, failuresSince } from '../app/lib/failures';
+import { linkify } from '../app/lib/manager';
 import { topLevelBlocks } from '../app/lib/manager-markdown';
-import { isRunId, lapHref } from '../app/lib/one-lap';
+import { isRunId, lapHref, replaceRunIds } from '../app/lib/one-lap';
+import { placeAddress } from '../app/lib/places';
+import { addressOfPlace } from '../app/lib/runs';
 import { workItemHref } from '../app/lib/work-item';
 import { type Db, openDb } from '../scripts/lib/db';
-import { OPEN_QUESTION_SQL, openQuestionOf, RESUMABLE_RUN_SQL, RESUME_FROM_SQL } from './actions';
+import {
+  OPEN_ISSUE_SQL,
+  OPEN_QUESTION_SQL,
+  openQuestionOf,
+  RESUMABLE_RUN_SQL,
+  RESUME_FROM_SQL,
+} from './actions';
 import type { Env } from './check-env';
 import { BASE_ENV_NAMES, CACHE_NAMES, pick } from './child-env';
 import { readFactoryNames } from './factories';
@@ -427,19 +432,21 @@ A run failed on the day its mc.laps.completed_at falls, whatever day it started:
 ${
   briefing
     ? ''
-    : `The failures still unresolved (not on a closed item, not followed by a completed run of the same workflow, stopped within 7 days): run live_query failure-groups with args ["${failuresSince(now)}"], the query the Attention failures read. Never count failures from laps or mc.run_stops yourself.
+    : `The failures still unresolved (not on a closed item, not followed by a completed run of the same workflow, stopped within 7 days): run live_query failure-groups with args ["${failuresSince(now)}"], the query Runs > Failures reads. Never count failures from laps or mc.run_stops yourself.
 
 `
-}How the factory is doing (merge rate, review rounds, lead time, owner asks, lines, issues merged, with their per-route split): run live_query factory-scorecard with args ["${scorecardUntil(now)}"], the same query the Factory page's scorecard shows. Each row is one measure with its value and n (how many records it rests on) for the last 7 and 30 UTC days and the period before each. Compare a measure only when both periods have at least ${TOO_FEW_BELOW} records; otherwise say there are too few to compare. Never work these out from laps, pull requests or mc.metric_records yourself.
+}How the factory is doing (merge rate, review rounds, lead time, owner asks, lines, issues merged, with their per-route split): run live_query factory-scorecard with args ${JSON.stringify(scorecardEdges(now))}, the same query the Factory page's scorecard shows. Each row is one measure with its value and n (how many records it rests on) for the last 7 and 30 days and the period before each. Compare a measure only when both periods have at least ${TOO_FEW_BELOW} records; otherwise say there are too few to compare. Never work these out from laps, pull requests or mc.metric_records yourself.
+
+The transient failures a later run of their workflow retried, today (the muted line on Runs > Failures): run live_query retried-runs with args ${JSON.stringify(retriedArgs(now))}.
 
 The mc schema:
 ${schema}
 
-Answer in short plain prose, naming runs by workflow and status. To give the owner links, a run list or a button, end the answer with one fenced block whose info string is mc, holding JSON:
+Answer in short plain prose, naming runs by workflow and status. Every run the answer names goes in the block's links by its full run id, and every work item by its issue number. To give the owner links, a run list or a button, end the answer with one fenced block whose info string is mc, holding JSON:
 \`\`\`mc
-{"links":[{"kind":"run","id":"<run id>"},{"kind":"item","id":<issue number>}],"runs":["<run id>"],"proposals":[{"action":"answer","run_id":"<run id>","option":"<option id>"},{"action":"answer","run_id":"<run id>","text":"<free text>"},{"action":"resume","run_id":"<run id>","from_step":"<step id>"}]}
+{"links":[{"kind":"run","id":"<run id>"},{"kind":"item","id":<issue number>}],"runs":["<run id>"],"proposals":[{"action":"answer","run_id":"<run id>","option":"<option id>"},{"action":"answer","run_id":"<run id>","text":"<free text>"},{"action":"resume","run_id":"<run id>","from_step":"<step id>"},{"action":"retriage","number":<issue number>},{"action":"close","number":<issue number>},{"action":"comment","number":<issue number>,"text":"<the owner's words>"}]}
 \`\`\`
-Every field is optional. Propose an answer only for a run waiting on a question in mc.attention_items, using one of its option ids (or text for "Something else"). Propose a resume only for a ${RESUMABLE_STATUSES.join(' or ')} run; from_step is optional and, when given, must be the step that failed: Archon resumes a run from its failed step. A proposal is a button the owner presses; it does nothing until they do. At most ${MAX_RUNS} runs and ${MAX_PROPOSALS} proposals.`;
+Every field is optional. Propose an answer only for a run waiting on a question in mc.attention_items, using one of its option ids (or text for "Something else"). Propose a resume only for a ${RESUMABLE_STATUSES.join(' or ')} run; from_step is optional and, when given, must be the step that failed: Archon resumes a run from its failed step. Propose retriage, close or comment only for an open issue: a comment's text is posted on the issue as the owner's words and the item is then re-triaged, and for a blocked or parked item whose blockers closed prefer retriage. A proposal is a button the owner presses; it does nothing until they do. At most ${MAX_RUNS} runs and ${MAX_PROPOSALS} proposals.`;
 }
 
 function renderConversation(messages: ChatRequest['messages']): string {
@@ -540,6 +547,24 @@ async function linkEvents(manager: Manager, factory: string, links: RawStructure
   return events;
 }
 
+/** A re-triage, close or comment on an issue the mirror holds open; a comment also needs its text. */
+async function itemProposal(
+  manager: Manager,
+  factory: string,
+  action: 'retriage' | 'close' | 'comment',
+  raw: RawStructure['proposals'][number],
+): Promise<ManagerEvent | undefined> {
+  const { number } = raw;
+  if (number === undefined) return undefined;
+  const [issue] = await lookup(manager, OPEN_ISSUE_SQL, [factory, number]);
+  if (!issue) return undefined;
+  const base = { type: 'proposal', factory, number } as const;
+  if (action === 'retriage') return { ...base, action, label: `Re-triage #${number}` };
+  if (action === 'close') return { ...base, action, label: `Close #${number}` };
+  if (!isAnswerText(raw.text)) return undefined;
+  return { ...base, action, text: raw.text, label: `Comment on #${number}, then re-triage` };
+}
+
 /**
  * A proposal the database backs: the run waits on a question and the option is one of its own, or
  * the run failed or paused and the step is one it ran. The server writes `occurrence` and `label`.
@@ -549,7 +574,10 @@ async function proposalEvent(
   factory: string,
   raw: RawStructure['proposals'][number],
 ): Promise<ManagerEvent | undefined> {
-  if (!isRunId(raw.run_id)) return undefined;
+  if (raw.action === 'retriage' || raw.action === 'close' || raw.action === 'comment') {
+    return itemProposal(manager, factory, raw.action, raw);
+  }
+  if (raw.run_id === undefined || !isRunId(raw.run_id)) return undefined;
   const runId = raw.run_id.toLowerCase();
   if (raw.action === 'answer') {
     const [row] = await lookup(manager, OPEN_QUESTION_SQL, [factory, runId]);
@@ -576,10 +604,6 @@ async function proposalEvent(
     }
     return { ...base, occurrence, option: null, text, label: 'Answer with your text' };
   }
-  if (raw.action !== 'resume') {
-    const unknown: never = raw.action;
-    throw new Error(`unknown proposal action ${unknown}`);
-  }
   const [lap] = await lookup(manager, RESUMABLE_RUN_SQL, [factory, runId]);
   if (!lap) return undefined;
   if (raw.from_step !== undefined) {
@@ -596,11 +620,36 @@ async function proposalEvent(
   };
 }
 
-/** Every entry the model named, checked against `mc`; what fails is dropped and logged. */
-async function structureEvents(manager: Manager, factory: string, block: string | null) {
+/**
+ * The run page's own run, when the prose names it and the model did not show it as a run card.
+ * Naming is case-insensitive over the raw prose, code spans included, with sibling runs' full ids
+ * masked since they share the short id. A link the panel cannot place inline shows after the prose.
+ */
+function viewedRunLink(cards: string[], viewed: string | undefined, prose: string) {
+  if (viewed === undefined) return [];
+  const id = viewed.toLowerCase();
+  if (cards.some((r) => r.toLowerCase() === id)) return [];
+  const own = replaceRunIds(prose, (uuid) => (uuid.toLowerCase() === id ? uuid : ' '));
+  const link = { type: 'link', kind: 'run', id, href: lapHref('', id) } as const;
+  return linkify(own.toLowerCase(), [link]).rest.length === 0 ? [{ kind: 'run' as const, id }] : [];
+}
+
+/**
+ * Every entry the model named, checked against `mc`; what fails is dropped and logged. The run
+ * the owner is viewing is linked when the prose names it, as the design has answers cite runs.
+ */
+async function structureEvents(
+  manager: Manager,
+  factory: string,
+  block: string | null,
+  prose: string,
+  viewed: string | undefined,
+) {
   const raw = parseBlock(block);
+  const cards = raw.runs.slice(0, MAX_RUNS);
+  raw.links.push(...viewedRunLink(cards, viewed, prose));
   const events: ManagerEvent[] = await linkEvents(manager, factory, raw.links);
-  const runs = await runSummaries(manager, factory, raw.runs.slice(0, MAX_RUNS));
+  const runs = await runSummaries(manager, factory, cards);
   if (runs.length > 0) events.push({ type: 'runs', runs });
   let proposals = 0;
   for (const proposal of raw.proposals) {
@@ -646,9 +695,11 @@ async function produce(
   const splitter = new AnswerSplitter();
   let wrote = false;
   let started = false;
+  let prose = '';
   const show = (text: string) => {
     if (text) {
       wrote = true;
+      prose += text;
       emit({ type: 'text', text });
     }
   };
@@ -727,7 +778,14 @@ async function produce(
   }
   let structured = true;
   try {
-    for (const event of await structureEvents(manager, request.factory, block)) emit(event);
+    for (const event of await structureEvents(
+      manager,
+      request.factory,
+      block,
+      prose,
+      briefing ? undefined : request.context.run,
+    ))
+      emit(event);
   } catch (error) {
     structured = false;
     console.error(`manager structure failed: ${error instanceof Error ? error.message : error}`);
@@ -781,13 +839,15 @@ export function answer(manager: Manager, request: ChatRequest, signal: AbortSign
   });
 }
 
-const BRIEFING_QUESTION =
-  "Write today's briefing: what merged, what failed (judge a run by the day it failed, completed_at, not the day it started), what waits on the owner, and the one or two things that matter most. At most three short blocks (a paragraph or a bullet each).";
+/** The briefing is the server's count line, its failure sentence, then at most this many blocks of the model's. */
+export const BRIEFING_PROSE_BLOCKS = 2;
+/** A model block longer than this is shortened at a word boundary: the briefing keeps every line to about 200 characters. */
+export const BRIEFING_BLOCK_CHARS = 200;
 
-/** What the Attention header counts: the row count of each source, and the runs behind the failure causes. */
-export type AttentionTally = Record<keyof typeof ATTENTION_SOURCES, number> & {
-  failureRuns: number;
-};
+const BRIEFING_QUESTION = `Write today's briefing: what merged, what failed (judge a run by the day it failed, completed_at, not the day it started), what waits on the owner, and the one or two things that matter most. At most ${BRIEFING_PROSE_BLOCKS} short blocks (a paragraph or a bullet each), each under ${BRIEFING_BLOCK_CHARS} characters.`;
+
+/** What the Attention header counts: the row count of each source. Failures are not among them. */
+export type AttentionTally = Record<keyof typeof ATTENTION_SOURCES, number>;
 
 /** The rows of each Attention source, the ones the count line is built from. */
 export type AttentionRows = Record<keyof typeof ATTENTION_SOURCES, unknown[]>;
@@ -795,7 +855,7 @@ export type AttentionRows = Record<keyof typeof ATTENTION_SOURCES, unknown[]>;
 let attentionQueries: Map<string, string> | undefined;
 
 /**
- * The rows of the four queries the Attention page sums, read in one statement so the parts add up,
+ * The rows of the queries the Attention page sums, read in one statement so the parts add up,
  * and the counts taken from them. Null when any of them fails, as the page then shows no number either.
  */
 async function attentionTally(
@@ -813,14 +873,12 @@ async function attentionTally(
     const { rows } = await readOnlyQuery(
       manager.db,
       `SELECT\n  ${listed.join(',\n  ')}`,
-      [factory, ...keys.flatMap((key) => sourceArgs(key, manager.now()) ?? [])],
+      [factory],
       MANAGER_LIMITS,
     );
     const listing = rows[0] as AttentionRows;
-    const tally = { failureRuns: 0 } as AttentionTally;
+    const tally = {} as AttentionTally;
     for (const key of keys) tally[key] = listing[key].length;
-    for (const group of listing.failures as { failures: number }[])
-      tally.failureRuns += group.failures;
     return { tally, rows: listing };
   } catch (err) {
     console.error(`manager: attention count failed: ${err instanceof Error ? err.message : err}`);
@@ -841,11 +899,9 @@ const inGroup = (t: AttentionTally, kind: AttentionKind): number =>
   );
 
 /** How the briefing's line words each group's count; the groups and their order come from the page's `KINDS`. */
-const GROUP_PHRASE: Record<AttentionKind, (n: number, t: AttentionTally) => string> = {
+const GROUP_PHRASE: Record<AttentionKind, (n: number) => string> = {
   decide: (n) => `${n} to decide`,
   unstick: (n) => `${n} to unstick`,
-  fix: (n, t) =>
-    `${n} to fix (${plural(t.failureRuns, 'failure', 'failures')} in ${plural(t.failures, 'cause', 'causes')})`,
 };
 
 /** The count sentence's words: `attentionLine` writes them and `statedTotals` reads them. */
@@ -864,14 +920,14 @@ export function attentionLine(t: AttentionTally): string {
         : 'No question is waiting. ';
   const parts = KINDS.map(({ kind }) => ({ kind, n: inGroup(t, kind) }))
     .filter(({ n }) => n > 0)
-    .map(({ kind, n }) => GROUP_PHRASE[kind](n, t));
+    .map(({ kind, n }) => GROUP_PHRASE[kind](n));
   return `${lead}${plural(total, COUNT_WORDS.one, COUNT_WORDS.many)} you: ${parts.join(', ')}.`;
 }
 
-function daySentence(day: DayDigest | null): string {
+function daySentence(day: DayDigest | null, failuresSaid: boolean): string {
   if (!day)
-    return " Today's merged pull requests and failed runs could not be read: say so in one sentence and do not guess them.";
-  return ` Today's merged pull requests and runs by workflow and outcome were read for you from the factory's data, a run on the day its completed_at falls: name the merged pull requests by number and title from them instead of querying for them. The briefing already lists any failure causes of the day as a paragraph of its own: do not list, regroup or count them, and do not restate the count line: write at most two short blocks. Where and_more is above 0, more merged pull requests were not listed: say there were others, without a number. The numbers in them are for your judgment: state none of them. These are today's failures, not the Attention failures, which are the causes still unresolved: do not add or compare them. ${JSON.stringify({ day: day.day, merged: day.merged, runs: day.runs })}`;
+    return " Today's merged pull requests could not be read: say so in one sentence and do not guess them. Do not list, regroup, count or quote failures.";
+  return ` Today's merged pull requests and runs by workflow and outcome were read for you from the factory's data, a run on the day its completed_at falls: name the most notable merged pull requests by number and title from them, briefly, instead of querying for them. ${failuresSaid ? 'The briefing already says in one sentence of its own what to know about open failures, with a link to Runs > Failures. ' : ''}Do not list, regroup, count or quote failures, and do not restate the count line: write at most ${BRIEFING_PROSE_BLOCKS} short blocks. Where and_more is above 0, more merged pull requests were not listed: say there were others, without a number. The numbers in them are for your judgment: state none of them. Failures are not things that wait on the owner and are not in the count line: do not add or compare them. ${JSON.stringify({ day: day.day, merged: day.merged, runs: day.runs })}`;
 }
 
 /**
@@ -883,6 +939,7 @@ export function briefingQuestion(
   tally: AttentionTally | null,
   rows: AttentionRows | null = null,
   day: DayDigest | null = null,
+  failuresSaid = true,
 ): string {
   const listing = rows
     ? ` These are the Attention rows, by source, that the line was counted from; name the items from them instead of querying for them, and never copy or paraphrase the line: ${JSON.stringify(rows)}`
@@ -890,7 +947,7 @@ export function briefingQuestion(
   const counted = tally
     ? ` The briefing already opens with this line, counted from the Attention page's own rows: "${attentionLine(tally)}" That line is the only count of what waits on the owner. State no number of Attention items, open questions, paused runs, failures or merged runs yourself, and never say the rows or the opening line disagree, miss something or may be incomplete; name the individual runs and issues instead.${listing}`
     : " The Attention page's count could not be read: do not say how many things wait on the owner.";
-  return BRIEFING_QUESTION + daySentence(day) + counted;
+  return BRIEFING_QUESTION + daySentence(day, failuresSaid) + counted;
 }
 
 type AttentionRead = { tally: AttentionTally; rows: AttentionRows };
@@ -951,28 +1008,66 @@ export function briefingFault(text: string, tally: AttentionTally): string | nul
   return stray === undefined ? null : `it states a count of ${stray} the page does not show`;
 }
 
-/** The briefing is 4 blocks: the server's count line, then at most this many of the model's. */
-export const BRIEFING_PROSE_BLOCKS = 3;
+/** A block over the limit is cut at a word boundary: its content shortens, it never vanishes. */
+function shortened(block: string): string {
+  if (block.length <= BRIEFING_BLOCK_CHARS) return block;
+  const room = block.slice(0, BRIEFING_BLOCK_CHARS - 1);
+  const space = room.search(/\s\S*$/);
+  return `${(space > 0 ? room.slice(0, space) : room).trimEnd()}…`;
+}
 
 /** Blocks are the panel's own: its markdown parser decides where one ends. */
 export function capBriefingProse(text: string, blocks = BRIEFING_PROSE_BLOCKS): string {
-  return topLevelBlocks(text).slice(0, blocks).join('\n\n');
+  return topLevelBlocks(text).slice(0, blocks).map(shortened).join('\n\n');
 }
 
+const failuresLink = (factory: string): string =>
+  `[Runs > Failures](${placeAddress(factory, 'runs')}?${addressOfPlace('failures')})`;
+
 /**
- * The day's failure causes as one paragraph, written from the digest so each cause is named once
- * and, where the digest says more exist, the paragraph says so. The panel counts every list item as
- * a block of its own, so a list would spend the briefing's four blocks on one section.
+ * The open failure causes as one plain sentence: how many, their classes, and the link to Runs >
+ * Failures, where the errors and runs are. Failures are not the owner's work, so the briefing never
+ * quotes them. The groups are those of `failure-groups`, the query that view reads, so the count agrees with it.
  */
-export function failureCausesBlock(day: DayDigest): string | null {
-  const { items, and_more } = day.failure_causes;
-  if (items.length === 0) return null;
-  const named = items.map(
-    (c) =>
-      `${c.cause.replace(/\s+/g, ' ')} (${c.workflow}${c.step ? `, step ${c.step}` : ''}; ${plural(c.runs, 'run', 'runs')}, e.g. ${c.example_run})`,
-  );
-  if (and_more > 0) named.push(`and ${plural(and_more, 'more cause', 'more causes')} not listed`);
-  return `Failure causes today: ${named.join('; ')}.`;
+export function failureLine(
+  groups: readonly Pick<FailureGroupRow, 'class'>[],
+  factory: string,
+): string | null {
+  if (groups.length === 0) return null;
+  const byClass = new Map<string, number>();
+  for (const g of groups) {
+    const label = failureLabel(g);
+    byClass.set(label, (byClass.get(label) ?? 0) + 1);
+  }
+  const classes =
+    byClass.size === 1
+      ? `${groups.length === 1 ? '' : 'all '}${[...byClass.keys()][0]}`
+      : [...byClass].map(([name, n]) => `${n} ${name}`).join(', ');
+  const open = `${plural(groups.length, 'failure cause is', 'failure causes are')} open`;
+  return `${open}${byClass.size === 1 ? ',' : ':'} ${classes}. See ${failuresLink(factory)}.`;
+}
+
+/** Said when the failure read fails, so an unreadable count never looks like no failures. */
+export const failuresUnreadable = (factory: string): string =>
+  `Open failures could not be read just now. See ${failuresLink(factory)}.`;
+
+let failureQuery: string | undefined;
+
+/** The unresolved failure groups the Failures view shows; null when they cannot be read, which the briefing says. */
+async function openFailures(manager: Manager, factory: string): Promise<FailureGroupRow[] | null> {
+  try {
+    failureQuery ??= loadLiveQueries(LIVE_QUERIES_DIR).get(FAILURES_QUERY);
+    const { rows } = await readOnlyQuery(
+      manager.db,
+      failureQuery as string,
+      [factory, failuresSince(manager.now())],
+      MANAGER_LIMITS,
+    );
+    return rows as unknown as FailureGroupRow[];
+  } catch (err) {
+    console.error(`manager: failure read failed: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
 }
 
 /** A model block that restates the count line is the line twice: drop it. */
@@ -981,24 +1076,13 @@ const withoutCountLine = (text: string, line: string): string =>
     .filter((block) => !block.includes(line))
     .join('\n\n');
 
-function capBriefingEvents(
-  events: ManagerEvent[],
-  line: string | null,
-  causes: string | null,
-): ManagerEvent[] {
+function capBriefingEvents(events: ManagerEvent[], line: string | null): ManagerEvent[] {
   const raw = events.flatMap((e) => (e.type === 'text' ? [e.text] : [])).join('');
-  const prose = capBriefingProse(
-    line ? withoutCountLine(raw, line) : raw,
-    BRIEFING_PROSE_BLOCKS - (causes ? 1 : 0),
-  );
-  const capped: ManagerEvent = {
-    type: 'text',
-    text: [causes, prose].filter((b) => b).join('\n\n'),
-  };
+  const prose = capBriefingProse(line ? withoutCountLine(raw, line) : raw);
   const at = events.findIndex((e) => e.type === 'text');
-  if (at < 0) return causes ? [capped, ...events] : events;
+  if (at < 0) return events;
   return events.flatMap((e, i): ManagerEvent[] =>
-    e.type !== 'text' ? [e] : i === at ? [capped] : [],
+    e.type !== 'text' ? [e] : i === at ? [{ type: 'text', text: prose }] : [],
   );
 }
 
@@ -1009,19 +1093,22 @@ async function generateBriefing(manager: Manager, factory: string, read: Attenti
       return null;
     },
   );
-  const causes = day && failureCausesBlock(day);
+  const open = await openFailures(manager, factory);
   const request: ChatRequest = {
     factory,
     context: { place: 'attention' },
     messages: [
-      { role: 'owner', text: briefingQuestion(read?.tally ?? null, read?.rows ?? null, day) },
+      {
+        role: 'owner',
+        text: briefingQuestion(read?.tally ?? null, read?.rows ?? null, day, open?.length !== 0),
+      },
     ],
   };
   let events: ManagerEvent[] = [];
   let ok = false;
   let cost = 0;
   let rejected = false;
-  // The model may contradict the count line: try once more, then show the count line and the server's cause paragraph.
+  // The model may contradict the count line: try once more, then show the count line alone.
   for (let attempt = 0; attempt < 2; attempt++) {
     events = [];
     const outcome = await produce(
@@ -1041,9 +1128,7 @@ async function generateBriefing(manager: Manager, factory: string, read: Attenti
       // `ok` stays as the attempt left it: a failed run is not kept, so the next ask tries again.
       if (!fault) console.warn('manager: briefing second attempt failed; showing the count line');
     }
-    // The fallback still carries the server's cause paragraph: only the model's prose is dropped.
-    if (!fault || last)
-      events = capBriefingEvents(events, read && attentionLine(read.tally), causes);
+    if (!fault || last) events = capBriefingEvents(events, read && attentionLine(read.tally));
     if (!fault) break;
     rejected = true;
     console.warn(`manager: briefing rejected (attempt ${attempt + 1}): ${fault}`);
@@ -1054,7 +1139,7 @@ async function generateBriefing(manager: Manager, factory: string, read: Attenti
     generatedAt: manager.now().toISOString(),
     basis: basisOf(read),
   };
-  // Without the day's digest the briefing is degraded: kept out of the cache so the next ask reads the day again.
+  // Without the day's digest the briefing is degraded: kept out of the cache so the next ask reads it again.
   if (ok && day) manager.briefings.set(factory, briefing);
   return { briefing, cost };
 }
@@ -1067,9 +1152,13 @@ export function briefing(manager: Manager, factory: string, refresh: boolean): R
     const read = await attentionTally(manager, factory);
     const tally = read?.tally ?? null;
     const basis = basisOf(read);
-    // Emitted with the prose, not before it: any event ends the panel's wait text.
-    const countLine = () => {
+    // Emitted with the prose, not before it: any event ends the panel's wait text. The failure
+    // sentence is read on every ask, not cached with the prose: it must agree with the live view it links to.
+    const opening = async () => {
       if (tally) emit({ type: 'text', text: `${attentionLine(tally)}\n\n` });
+      const open = await openFailures(manager, factory);
+      const sentence = open ? failureLine(open, factory) : failuresUnreadable(factory);
+      if (sentence) emit({ type: 'text', text: `${sentence}\n\n` });
     };
     const cached = manager.briefings.get(factory);
     if (
@@ -1079,7 +1168,7 @@ export function briefing(manager: Manager, factory: string, refresh: boolean): R
       cached.basis !== null &&
       cached.basis === basis
     ) {
-      countLine();
+      await opening();
       for (const event of cached.events) emit(event);
       emit(done(manager, 0, { generated_at: cached.generatedAt, cached: true }));
       return;
@@ -1098,7 +1187,7 @@ export function briefing(manager: Manager, factory: string, refresh: boolean): R
     if (made.basis !== basis) {
       ({ briefing: made, cost } = await generateBriefing(manager, factory, read));
     }
-    countLine();
+    await opening();
     for (const event of made.events) emit(event);
     emit(done(manager, cost, { generated_at: made.generatedAt, cached: false }));
   });

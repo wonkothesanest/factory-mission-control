@@ -121,7 +121,7 @@ export function took(
 }
 
 /** The part of a step's address that says where it is: `ship__deliver__rounds.review__synthesize` reads `review__synthesize`. */
-const stepName = (step: string): string => step.split('.').pop() ?? step;
+export const stepName = (step: string): string => step.split('.').pop() ?? step;
 
 /** The mono line under the workflow: round, step and pull request, each when known. */
 export function subLine(run: RunRow): string {
@@ -149,6 +149,23 @@ export function stopLine(run: RunRow): string | null {
 
 /** The last page number the query's offset can hold as a bigint without overflowing. */
 const MAX_PAGE = Math.floor(Number.MAX_SAFE_INTEGER / RUNS_PAGE_SIZE);
+
+/** The two views of Runs; the address names one with `?view=failures`, and none means every run. */
+export type RunsPlace = 'all' | 'failures';
+
+export const RUNS_PLACES = [
+  { value: 'all', label: 'All runs' },
+  { value: 'failures', label: 'Failures' },
+] as const;
+
+const RUNS_VIEW_PARAM = 'view';
+
+export const placeOf = (params: URLSearchParams): RunsPlace =>
+  params.get(RUNS_VIEW_PARAM) === 'failures' ? 'failures' : 'all';
+
+/** The address that shows a view; every run is the bare address. */
+export const addressOfPlace = (place: RunsPlace): URLSearchParams =>
+  place === 'failures' ? new URLSearchParams({ [RUNS_VIEW_PARAM]: place }) : new URLSearchParams();
 
 /** Everything the page's address says about what to show; a value it cannot read falls back to the default. */
 export function filterOf(params: URLSearchParams): RunsFilter {

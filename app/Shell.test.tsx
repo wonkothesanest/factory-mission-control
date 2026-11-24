@@ -19,6 +19,7 @@ const ready: Live = {
   status: 'ready',
   factories: ['mission-control', 'second-factory'],
   client,
+  offline: false,
 };
 
 /** The app's tree as `appRoutes` builds it, over a server configuration that is already in. */

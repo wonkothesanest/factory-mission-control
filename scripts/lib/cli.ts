@@ -4,6 +4,7 @@ import { type Env, loadCheckEnv } from '../../server/check-env';
 import { askArchon, type RunStatus } from './archon-run';
 import { type OpenDb, openDb } from './db';
 import { isCheckDatabase, RefusedDatabase, requireCheckDatabase } from './guard';
+import { advisoryPassLock, type TakePassLock } from './pass-lock';
 import { databaseNameOf } from './target';
 
 export const REPO_ROOT = resolve(import.meta.dir, '..', '..');
@@ -25,6 +26,8 @@ export type Deps = {
    */
   github: () => GitHub;
   openDb: OpenDb;
+  /** Takes a job's single-pass lock on the database at `url`; undefined while another pass holds it (`scripts/lib/pass-lock.ts`). */
+  passLock: TakePassLock;
   /** GET-only fetch for commands that read raw repository contents (`arch:parse`); offline by default. */
   fetch: GetFetch;
   now: () => Date;
@@ -56,6 +59,7 @@ export function defaultDeps(): Deps {
     databaseName: async (url) => databaseNameOf(url),
     github: () => offlineGitHub(),
     openDb,
+    passLock: advisoryPassLock(openDb),
     fetch: offlineFetch,
     now: () => new Date(),
     sleep: (ms) => Bun.sleep(ms),

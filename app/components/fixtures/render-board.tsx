@@ -1,0 +1,166 @@
+import { createRoot } from 'react-dom/client';
+import { createMemoryRouter, RouterProvider } from 'react-router';
+import { Shell } from '../../Shell';
+import { type BoardView, COLUMNS, PIPELINE } from '../../lib/board';
+import { BoardBody } from '../Board';
+import { Column } from '../Column';
+import { Segmented } from '../ui/Segmented';
+import { FakeLiveSocket } from '../../live/fixtures/fake-socket';
+
+export { setManager } from './render-layout';
+
+let current: { unmount: () => void } | undefined;
+
+const BUILD_ITEMS = Array.from({ length: 15 }, (_, i) => i + 1);
+
+function view(orders: number): BoardView {
+  return {
+    orders: Array.from({ length: orders }, (_, i) => ({
+      name: `order-${i}`,
+      done: 1,
+      total: 4,
+      landsOn: 'main',
+      building: 1,
+      needsYou: 0,
+    })),
+    columns: COLUMNS.map((c) => ({ ...c, items: [] })),
+    pipeline: PIPELINE.map((stage) => {
+      const numbers = stage.id === 'build' ? BUILD_ITEMS : [];
+      return {
+        ...stage,
+        items: numbers.map((number) => ({
+          number,
+          title: `Item ${number}`,
+          chips: [],
+          round: 0,
+          dots: [],
+          run: null,
+          returned: 0,
+          mergedAt: null,
+          stop: null,
+          waits: null,
+          to: `/f/x/work/${number}`,
+          status: 'waiting' as const,
+        })),
+        pills:
+          numbers.length > 0
+            ? [{ label: 'waiting' as const, state: 'idle' as const, count: numbers.length }]
+            : [],
+      };
+    }),
+    found: { filed: 0, tracked: 0, dropped: 0 },
+    notInOrder: 0,
+    older: 0,
+    olderHref: null,
+  };
+}
+
+/** The Board route's frame around the real BoardBody. */
+function Page({ orders }: { orders: number }) {
+  return (
+    <Column data-board width="max-w-none" className="px-4 py-6 min-[760px]:px-6">
+      <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 max-w-xl">
+          <h1 className="text-[length:var(--v3-t-title)] leading-tight font-bold">Board</h1>
+          <p className="mt-1 text-[length:var(--v3-t-body)]">
+            Every work item by stage. Work flows left to right; a work order groups the items that
+            ship together.
+          </p>
+        </div>
+        <Segmented
+          label="Board view"
+          options={[
+            { value: 'pipeline', label: 'Pipeline' },
+            { value: 'table', label: 'Table' },
+          ]}
+          value="pipeline"
+          onChange={() => {}}
+        />
+      </header>
+      <BoardBody view={view(orders)} mode="pipeline" order={null} onOrder={() => {}} />
+    </Column>
+  );
+}
+
+/** Mounts the real shell with the Board's frame around the real BoardBody: 15 Build items and `orders` work orders. */
+export function mount(orders: number) {
+  current?.unmount();
+  // The local live socket (local-factory port): every query answers no rows.
+  window.__MC_LIVE__ = { factories: ['x'], socket: new FakeLiveSocket(() => undefined) };
+  const router = createMemoryRouter(
+    [
+      {
+        element: <Shell />,
+        children: [{ path: '/f/:factory/board', element: <Page orders={orders} /> }],
+      },
+    ],
+    { initialEntries: ['/f/x/board'] },
+  );
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  root.render(<RouterProvider router={router} />);
+  current = {
+    unmount() {
+      root.unmount();
+      container.remove();
+      delete window.__MC_LIVE__;
+    },
+  };
+}
+
+/** Where the Build column sits in the window, whether its list scrolls, and what scrolls sideways. */
+export function measure() {
+  const column = document.querySelector<HTMLElement>('[data-board-stage="build"]');
+  const list = column?.querySelector<HTMLElement>('[data-stage-items]');
+  const pane = document.querySelector('main')?.parentElement;
+  const found = document.querySelector('[data-found]');
+  if (!column || !list || !pane || !found) return null;
+  const c = column.getBoundingClientRect();
+  return {
+    innerHeight: window.innerHeight,
+    paneScrollTop: pane.scrollTop,
+    top: Math.round(c.top),
+    bottom: Math.round(c.bottom),
+    listScrolls: list.scrollHeight > list.clientHeight,
+    sideways: pane.scrollWidth > pane.clientWidth,
+    foundTop: Math.round(found.getBoundingClientRect().top),
+  };
+}
+
+/** The hidden-column hints, their labels, and whether the Merged column is fully inside the row. */
+export function fades() {
+  const label = (side: string) =>
+    document.querySelector(`[data-stage-fade="${side}"]`)?.textContent ?? null;
+  const row = document.querySelector<HTMLElement>('[data-stage-row]');
+  const merged = document.querySelector<HTMLElement>('[data-board-stage="merged"]');
+  const r = row?.getBoundingClientRect();
+  const m = merged?.getBoundingClientRect();
+  return {
+    left: label('left'),
+    right: label('right'),
+    mergedVisible: !!r && !!m && m.right <= r.right + 1 && m.left >= r.left - 1,
+    scrollLeft: row?.scrollLeft ?? 0,
+  };
+}
+
+/** Clicks a hint and waits for the smooth scroll to settle. */
+export async function clickFade(side: 'left' | 'right') {
+  document.querySelector<HTMLElement>(`[data-stage-fade="${side}"]`)?.click();
+  await new Promise((r) => setTimeout(r, 1200));
+}
+
+/** Focuses a hint, ready for a real key press. */
+export function focusFade(side: 'left' | 'right') {
+  document.querySelector<HTMLElement>(`[data-stage-fade="${side}"]`)?.focus();
+}
+
+/** Where keyboard focus is: whether it is inside the Board, and the row's scroll position. */
+export function focusAt() {
+  const active = document.activeElement;
+  return {
+    inBoard: !!active && !!document.querySelector('[data-board]')?.contains(active),
+    isBody: active === document.body,
+    scrollLeft: document.querySelector<HTMLElement>('[data-stage-row]')?.scrollLeft ?? 0,
+  };
+}

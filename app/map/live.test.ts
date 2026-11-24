@@ -31,6 +31,8 @@ const lap = (
   url: null,
   at: null,
   prs: null,
+  stop_line: null,
+  asks: null,
 });
 
 const hereOn = (rows: HomeMapRow[], cards: readonly { id: string }[]) => {
@@ -144,6 +146,8 @@ test('each chip sits on the card that carries it, and a source not delivered yet
     url: 'https://github.com/o/r/pull/109',
     at: null,
     prs: null,
+    stop_line: null,
+    asks: null,
   };
   const live = cardLive(
     FACTORY_MAP,
@@ -299,6 +303,7 @@ test('the work orders with an open issue are the chip of the Work order card: ab
     name: 'combat',
     total_count: 3,
     open_count: 2,
+    done_count: 1,
     merged_count: 1,
     lands_on: 'staging',
     last_closed_at: null,
@@ -320,6 +325,7 @@ test('the Work order view lists the open work orders on Choose what goes next: u
     name: 'combat',
     total_count: 3,
     open_count: 2,
+    done_count: 1,
     merged_count: 1,
     lands_on: null,
     last_closed_at: null,
@@ -653,6 +659,7 @@ test('Merge gate lists the gate, the Staging cards the deploy and open work orde
     name: 'combat',
     total_count: 3,
     open_count: 2,
+    done_count: 1,
     merged_count: 1,
     lands_on: 'staging',
     last_closed_at: null,

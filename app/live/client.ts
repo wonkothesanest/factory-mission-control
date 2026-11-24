@@ -93,7 +93,13 @@ export function createLiveClient(
   {
     wait = (ms: number, then: () => void) => setTimeout(then, ms),
     snapshot,
-  }: { wait?: (ms: number, then: () => void) => unknown; snapshot?: Snapshot } = {},
+    connection,
+  }: {
+    wait?: (ms: number, then: () => void) => unknown;
+    snapshot?: Snapshot;
+    /** Told `up` each time a socket opens and `down` each time one is lost (not on `close()`). */
+    connection?: (event: 'up' | 'down') => void;
+  } = {},
 ): LiveClient {
   const subscriptions = new Map<string, Subscription>();
   let next = 0;
@@ -121,6 +127,7 @@ export function createLiveClient(
       if (opened || socket !== current) return;
       opened = true;
       delay = 0;
+      connection?.('up');
       for (const [id, subscription] of subscriptions) send(subscribeMessage(id, subscription));
     };
     current.addEventListener('open', onOpen);
@@ -151,6 +158,7 @@ export function createLiveClient(
       socket = undefined;
       for (const { listener } of subscriptions.values()) listener.lost?.();
       if (closed) return;
+      connection?.('down');
       delay = Math.min(RECONNECT_CEILING_MS, Math.max(RECONNECT_FIRST_MS, delay * 2));
       wait(delay, connect);
     };

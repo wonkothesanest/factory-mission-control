@@ -1,7 +1,13 @@
 import { expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BLOCKED_STAGES, FOUND_OUTCOMES, PARKED, parked } from '../../app/lib/board';
+import {
+  BLOCKED_STAGES,
+  FOUND_OUTCOMES,
+  PARKED,
+  parked,
+  WORKFLOW_STAGE,
+} from '../../app/lib/board';
 import { STOP_CLASSES } from '../../app/lib/failures';
 import { causeOf } from '../../app/lib/health';
 import {
@@ -13,8 +19,15 @@ import {
   SPLIT_WORKFLOW,
 } from '../../app/lib/one-lap';
 import { runsArgs } from '../../app/lib/runs';
-import { QUEUE_ENDING_STATE, QUEUE_REVIEW_STATE, REVIEW_OUTCOME_STATE } from '../../app/lib/states';
+import {
+  CHECK_OVERALL_STATE,
+  QUEUE_ENDING_STATE,
+  QUEUE_REVIEW_STATE,
+  REVIEW_OUTCOME_STATE,
+} from '../../app/lib/states';
 import { ROUTE_OF_LABEL, WORK_ITEM_NUMBER } from '../../app/lib/work-item';
+import { FACTORY_MAP } from '../../app/map/factory-map';
+import { BUILD_STATUSES } from '../../scripts/fixture/write';
 import { FAILED_SIGNATURES_SQL } from '../../scripts/lib/failed-signatures';
 import { runMigrations } from '../../scripts/migrate';
 import { STOP_CORPUS } from '../run-stops-corpus';
@@ -115,9 +128,9 @@ test('health-workable.sql excludes the workflows board.ts says hold no work item
   ).toEqual([SPLIT_WORKFLOW]);
 });
 
-test('work-item.sql and scorecard.sql name only the workflows one-lap.ts owns', () => {
+test('work-item.sql, scorecard.sql and unstick.sql name only the workflows one-lap.ts owns', () => {
   const owned = new Set([OLD_LOOP_WORKFLOW, BUILD_QUEUE_WORKFLOW, INTAKE_WORKFLOW]);
-  for (const file of ['work-item.sql', 'scorecard.sql']) {
+  for (const file of ['work-item.sql', 'scorecard.sql', 'unstick.sql']) {
     const named = [...read('db', 'queries', file).matchAll(/workflow_name\s*=\s*'([^']*)'/g)].map(
       (m) => m[1] as string,
     );
@@ -410,6 +423,37 @@ const statusUnion = (file: string, name: string) => {
   return quoted(match?.[1] ?? '');
 };
 
+test('the statuses board.ts compares are the pinned pack’s and the check’s', () => {
+  const build = statusUnion('build.ts', 'BuildStatus');
+  const merge = statusUnion('merge.ts', 'MergeStatus');
+  const source = read('app', 'lib', 'board.ts');
+  const compared = (field: string) =>
+    [...source.matchAll(new RegExp(`${field} (?:===|!==) '([^']*)'`, 'g'))].map(
+      (m) => m[1] as string,
+    );
+  const placed = { build: compared('build_status'), merge: compared('merge_status') };
+  // The four the Board places by are compared there, so the scan below cannot pass by finding none.
+  for (const status of ['ready', 'asking']) expect(placed.build).toContain(status);
+  for (const status of ['waiting', 'returned', 'asking']) expect(placed.merge).toContain(status);
+  for (const status of placed.build) expect(build).toContain(status);
+  for (const status of placed.merge) expect(merge).toContain(status);
+  for (const verdict of compared('app_check'))
+    expect(Object.keys(CHECK_OVERALL_STATE)).toContain(verdict);
+  for (const status of BUILD_STATUSES)
+    expect(build, `fixture:write revision ${status}`).toContain(status);
+});
+
+test('WORKFLOW_STAGE names, for each workflow, a stage whose card covers that workflow', () => {
+  for (const [workflow, stage] of Object.entries(WORKFLOW_STAGE)) {
+    const card = FACTORY_MAP.cards.find((c) => c.id === stage);
+    expect(card, `the map has a ${stage} card`).toBeDefined();
+    expect(
+      card?.covers.map((c) => c.workflow),
+      `${stage} covers ${workflow}`,
+    ).toContain(workflow);
+  }
+});
+
 test('the parked status is the pinned pack’s, in parked() and in health-workable', () => {
   const statuses = {
     build: statusUnion('build.ts', 'BuildStatus'),
@@ -471,6 +515,66 @@ test('the stages Unstick reads are the pinned pack’s', () => {
   expect(literals.length).toBeGreaterThan(0);
   for (const stage of literals) expect(stages, `stage '${stage}'`).toContain(stage);
 });
+
+test('the stage the Board reads a Depends on for is the pinned pack’s', () => {
+  const stages = statusUnion('workitem.ts', 'Stage');
+  const literals = [...sqlOf('board').matchAll(/w\.stage (?:=|IS DISTINCT FROM) '([^']*)'/g)].map(
+    (m) => m[1],
+  );
+  expect(literals.length).toBeGreaterThan(0);
+  for (const stage of literals) expect(stages, `stage '${stage}'`).toContain(stage);
+});
+
+test('a Depends on is open on the Board exactly when Unstick does not count it gone', async () => {
+  const db = await onTheSeed();
+  const cases: [string, string | null][] = [
+    ['a closed issue', null],
+    [
+      'a closed pull request',
+      `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at) VALUES ('mission-control', 9101, 't', 'closed', now(), 'h', 'u', now(), now())`,
+    ],
+    ['an open issue', null],
+    [
+      'an open pull request',
+      `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at) VALUES ('mission-control', 9102, 't', 'open', NULL, 'h', 'u', now(), now())`,
+    ],
+    ['a number that is not mirrored', null],
+  ];
+  const depends = [4, 9101, 12, 9102, 999];
+  try {
+    await db.query(
+      `UPDATE mc.issues SET state = 'closed' WHERE factory = 'mission-control' AND number = 4`,
+    );
+    await db.query(
+      `INSERT INTO mc.work_item_states (project_key, number, revision, stage)
+       SELECT codebase, 9, 1, 'blocked' FROM mc.factories WHERE name = 'mission-control'`,
+    );
+    for (const [i, [name, insert]] of cases.entries()) {
+      if (insert !== null) await db.query(insert);
+      await db.query(`DELETE FROM mc.issue_dependencies WHERE issue_number = 9`);
+      await db.query(
+        `INSERT INTO mc.issue_dependencies (factory, issue_number, depends_on) VALUES ('mission-control', 9, $1)`,
+        [depends[i]],
+      );
+      const [row] = (
+        await db.query(queries.find(([n]) => n === 'board')?.[1] as string, ['mission-control'])
+      ).filter((r) => r.number === 9);
+      const gone = (await db.query(sqlOf('unstick'), ['mission-control'])).some(
+        (r) => r.kind === 'blocked' && r.number === 9,
+      );
+      expect([name, ((row?.blockers as number[] | undefined) ?? []).length === 0]).toEqual([
+        name,
+        gone,
+      ]);
+      const workable = (await db.query(sqlOf('health-workable'), ['mission-control'])).some(
+        (r) => r.kind === 'issue' && r.issue_number === 9,
+      );
+      expect([name, workable]).toEqual([name, gone]);
+    }
+  } finally {
+    await db.close();
+  }
+}, 60_000);
 
 test('the stages the Board calls blocked are the pinned pack’s', () => {
   const stages = statusUnion('workitem.ts', 'Stage');
@@ -567,7 +671,7 @@ test('runs, home-map and health-workable resolve the same item for every source 
     await db.query(
       `INSERT INTO mc.factories (name, repository, codebase, console) VALUES ('f', 'o/r', 'o/r', 'c')`,
     );
-    for (let n = 1; n <= 8; n++) {
+    for (let n = 1; n <= 14; n++) {
       await db.query(
         `INSERT INTO mc.issues (factory, number, title, state, url, created_at, updated_at)
          VALUES ('f', $1, $2, 'open', 'u', now(), now())`,
@@ -585,11 +689,17 @@ test('runs, home-map and health-workable resolve the same item for every source 
       '6': { status: 'running', claim: null, facts: null, input: null },
       '7': { status: 'completed', claim: null, facts: 7, input: null },
       '8': { status: 'running', claim: null, facts: 8, input: null, workflow: SPLIT_WORKFLOW },
+      // Paused on a person: the waiting rows of home-map name the same item.
+      a: { status: 'paused', claim: 9, facts: null, input: null },
+      b: { status: 'paused', claim: null, facts: 10, input: null },
+      c: { status: 'paused', claim: null, facts: null, input: 11 },
+      d: { status: 'paused', claim: 12, facts: 13, input: 14 },
+      e: { status: 'paused', claim: null, facts: null, input: null },
     } as const;
     for (const [c, r] of Object.entries(runs)) {
       await db.query(
-        `INSERT INTO mc.laps (run_id, factory, workflow_name, status, started_at, issue_number)
-         VALUES ($1, 'f', $4, $2, now(), $3)`,
+        `INSERT INTO mc.laps (run_id, factory, workflow_name, status, started_at, issue_number, attention_open)
+         VALUES ($1, 'f', $4, $2, now(), $3, $2 = 'paused')`,
         [id(c), r.status, r.input, 'workflow' in r ? r.workflow : 'w'],
       );
       if (r.facts !== null) {
@@ -625,23 +735,41 @@ test('runs, home-map and health-workable resolve the same item for every source 
     const expectedTitles = Object.fromEntries(
       Object.entries(expected).map(([k, v]) => [k, v === null ? null : `t${v}`]),
     );
+    const waitingRuns = {
+      [id('a')]: 9,
+      [id('b')]: 10,
+      [id('c')]: 11,
+      [id('d')]: 12,
+      [id('e')]: null,
+    };
     const lanes = (
       await db.query(sqlOf('runs'), [
         'f',
         ...runsArgs({ q: '', state: '', hideIdle: false, page: 1 }),
       ])
     ).filter((r) => r.status === 'running');
-    const laps = (await db.query(sqlOf('home-map'), ['f', ''])).filter((r) => r.kind === 'lap');
+    const map = await db.query(sqlOf('home-map'), ['f', '']);
+    const laps = map.filter((r) => r.kind === 'lap' && (r.run_id as string) in expected);
+    const waiting = map.filter((r) => r.kind === 'waiting');
     expect(held(lanes)).toEqual(expected);
     expect(held(laps)).toEqual(expected);
     expect(titled(lanes, 'issue_title')).toEqual(expectedTitles);
     expect(titled(laps, 'title')).toEqual(expectedTitles);
+    // A paused run waiting on a person still counts with no item, and names the same item otherwise.
+    expect(held(waiting)).toEqual(waitingRuns);
+    expect(titled(waiting, 'title')).toEqual(
+      Object.fromEntries(
+        Object.entries(waitingRuns).map(([k, v]) => [k, v === null ? null : `t${v}`]),
+      ),
+    );
     // The run page names the same item, and has no status filter: the completed run 7 is on it too.
     const page = await Promise.all(
-      Object.keys(runs).map(
-        async (c) =>
-          ((await db.query(sqlOf('one-lap'), ['f', id(c)]))[0] ?? {}) as Record<string, unknown>,
-      ),
+      Object.keys(runs)
+        .filter((c) => !(id(c) in waitingRuns))
+        .map(
+          async (c) =>
+            ((await db.query(sqlOf('one-lap'), ['f', id(c)]))[0] ?? {}) as Record<string, unknown>,
+        ),
     );
     expect(Object.fromEntries(page.map((r) => [r.run_id, r.issue_number ?? null]))).toEqual({
       ...expected,
@@ -652,8 +780,11 @@ test('runs, home-map and health-workable resolve the same item for every source 
       [id('7')]: 't7',
     });
     const workable = (await db.query(sqlOf('health-workable'), ['f']))
-      .flatMap((r) => (r.kind === 'issue' ? [r.issue_number as number] : []))
+      .flatMap((r) =>
+        r.kind === 'issue' && (r.issue_number as number) <= 8 ? [r.issue_number as number] : [],
+      )
       .sort();
+    // Issues 9 and up belong to the paused runs, which health-workable does not read.
     // A split run shows its item on Laps and the map, but holds nothing: 8 stays workable.
     expect(workable).toEqual([6, 7, 8]);
   } finally {
@@ -1318,9 +1449,52 @@ test('the retried rule reads the same in failure-groups, retried-runs and the li
       .sort();
     expect(cards).toEqual(live);
     expect(cards).toHaveLength(2);
-    const retried = await db.query(sqlOf('retried-runs'), ['f']);
+    const retried = await db.query(sqlOf('retried-runs'), ['f', '2026-10-24T00:00:00.000Z']);
     expect(retried.map((r) => r.run_id)).toEqual([second, first]);
   } finally {
     await db.close();
   }
 }, 60_000);
+
+test('the work-item facts the Board projects are the pinned pack’s words', () => {
+  const migration = read('db', 'migrations', '20261113T1500Z_returns_answered_return.sql');
+  const labels = [
+    ...(/d ->> 'decision' IN \(([^)]*)\)/.exec(migration)?.[1] ?? '').matchAll(/'([^']*)'/g),
+  ].map((m) => m[1]);
+  expect(labels).toHaveLength(2);
+  const record = read('fixtures/pack/queue/sdlc/merge-queue/scripts/record.ts');
+  const merge = squashed(read('fixtures', 'pack', 'queue', 'sdlc', '.shared', 'merge.ts'));
+  expect(merge).toContain(
+    'export function answeredMergeDecision(effect: MergeEffect): `answered: ${MergeEffect}` { return `answered: ${effect}`; }',
+  );
+  const effects = /MERGE_EFFECTS = \[([^\]]*)\]/.exec(merge)?.[1] ?? '';
+  for (const label of labels) {
+    const answered = /^answered: (\w+)$/.exec(label)?.[1];
+    if (answered) expect(effects, `merge effect '${answered}'`).toContain(`'${answered}'`);
+    else expect(record).toContain(`decision: '${label}'`);
+  }
+  const merged = /st\.merge_status = '([^']*)'/.exec(sqlOf('board'))?.[1] ?? '';
+  expect(statusUnion('merge.ts', 'MergeStatus')).toContain(merged);
+  const shape = /export interface BuildRound \{([\s\S]*?)\n\}/.exec(
+    read('fixtures', 'pack', 'queue', 'sdlc', '.shared', 'build.ts'),
+  )?.[1];
+  expect(shape, 'build.ts declares BuildRound').toBeDefined();
+  const keys = new Set([...(shape ?? '').matchAll(/^ {2}readonly (\w+)\??:/gm)].map((m) => m[1]));
+  const roundKeys = [
+    ...migration.matchAll(/\br -> '(\w+)'/g),
+    ...migration.matchAll(/\br ->> '(\w+)'/g),
+    ...migration.matchAll(/'rounds' -> -1 ->> '(\w+)'/g),
+  ].map((m) => m[1]);
+  for (const key of roundKeys) expect(keys, `BuildRound key '${key}'`).toContain(key);
+  expect(roundKeys).toEqual(expect.arrayContaining(['at', 'reason', 'reviews', 'run_id']));
+});
+
+test('the board merged_at keeps a merge only while it finishes the item, as the pack’s finished() does', () => {
+  const pack = squashed(read('fixtures', 'pack', 'queue', 'sdlc', '.shared', 'order.ts'));
+  expect(pack).toContain(
+    "merge?.status === 'merged' && merge.at >= (doc.facts.build?.at ?? '') && merge.at >= (doc.facts.triage?.at ?? '')",
+  );
+  expect(squashed(sqlOf('board'))).toContain(
+    "st.merge_status = 'merged' AND st.merge_at >= coalesce(st.build_at, '') AND st.merge_at >= coalesce(st.triage_at, '') THEN st.merge_at",
+  );
+});

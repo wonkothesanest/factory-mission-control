@@ -18,6 +18,7 @@ import type { HealthWorkableRow } from '../lib/health';
 import type { OwnerQueueRow } from '../lib/owner-queue';
 import { useFactory } from '../live/FactoryProvider';
 import { AWAITED, Feed, overall, type Source } from '../live/Feed';
+import { useUnavailable } from '../live/LiveProvider';
 import type { HomeMapRow, WorkOrderRow } from '../map/live';
 
 /** The browser's clock, moved on to each moment a merged work item or a finished order drops off. */
@@ -38,6 +39,7 @@ export default function Board(): ReactElement {
   const [search, setSearch] = useSearchParams();
   const order = search.get(ORDER_PARAM) || null;
   const mode = search.get(VIEW_PARAM) === TABLE_VIEW ? 'table' : 'pipeline';
+  const unavailable = useUnavailable();
   const [board, setBoard] = useState<Source<BoardRow>>(AWAITED);
   const [map, setMap] = useState<Source<HomeMapRow>>(AWAITED);
   const [workable, setWorkable] = useState<Source<HealthWorkableRow>>(AWAITED);
@@ -90,12 +92,7 @@ export default function Board(): ReactElement {
         } satisfies BoardSources)
       : undefined;
   return (
-    <Column
-      data-board
-      data-state={state}
-      width="max-w-[1100px]"
-      className="px-4 py-6 min-[760px]:px-6"
-    >
+    <Column data-board data-state={state} width="max-w-none" className="px-4 py-6 min-[760px]:px-6">
       <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 max-w-xl">
           <h1 className="text-[length:var(--v3-t-title)] leading-tight font-bold text-[color:var(--v3-fg)]">
@@ -123,7 +120,7 @@ export default function Board(): ReactElement {
       <Feed<WorkOrderRow> query="work-orders" factory={factory} into={setOrders} />
       <Feed<DiscoveryRow> query="discoveries" factory={factory} into={setDiscoveries} />
       {state === 'error' ? (
-        <EmptyState title="Live data is unavailable." />
+        <EmptyState title={unavailable} />
       ) : sources === undefined ? (
         <EmptyState title="Loading the board." />
       ) : (
@@ -132,7 +129,6 @@ export default function Board(): ReactElement {
           mode={mode}
           order={order}
           onOrder={setOrder}
-          tableHref={`?${tableParams}`}
         />
       )}
     </Column>

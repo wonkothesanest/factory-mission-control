@@ -15,8 +15,8 @@ The owner looked at v3 on live data and found Attention said "23 things need you
 the 23 were failure groups. Where `mockup.html` or a screenshot (`01`, `02`, `03`, `40`) still shows a
 **Fix** group, a failure sparkline or a failure count on Attention, this section wins.
 
-1. **Attention holds only what needs the owner.** Its groups are **Decide**, **Unstick** and **Clean
-   up**. Failures are not on Attention. The number "N things need you", the nav badge, the phone tab
+1. **Attention holds only what needs the owner.** Its groups are **Decide** and **Unstick**
+   (a Clean up group returns only once its source is defined; owner ruling on #646). Failures are not on Attention. The number "N things need you", the nav badge, the phone tab
    badge, the Manager's "Looking at Attention · N items" chip and the briefing's count all count the
    same items, and failures are never among them.
 2. **Failures live on Runs.** Runs gets a segmented control at top right, **All runs / Failures**
@@ -106,10 +106,12 @@ The work item page (`/f/<factory>/work/<n>`) and the step screens stay, and adop
   - schedules and main health, with one dot
   - the factory switcher, with the engine version
 
-**Phone (under 760 px).** There is no side nav and no docked panel. Instead:
+**Phone (under 1024 px).** There is no side nav and no docked panel. Instead:
 - a top bar with the brand and the running count
 - one column of content
 - a bottom tab bar: Attention (with its badge), Factory, Board, Runs, Manager. The Manager is a full-screen tab.
+
+Under 1024 px the shell draws this layout, so a docked Manager never squeezes the page. The page content of Board, Runs and One run still switches its own columns at 760 px, so between 760 and 1023 px the phone shell holds the wider page layouts.
 
 ## Five rules every screen follows
 
@@ -237,18 +239,76 @@ Build these once, as shared components, and use them on every place:
 - **Tabs:** Timeline (default), Steps, Log and Artifacts. Log and Artifacts may link to the console.
 - **Timeline.** The failed step opens on its error panel, with "Resume from here".
 
-## Board
+## Board (owner change 2026-11-13: the board follows each work item through every stage)
 
-- **Pipeline** (default), with a Table alternative.
-- **Work orders on top:** name, "work order · lands on <target>", a progress bar in state colors,
-  and "N of M merged · building · needs you".
-- **Five stage cards:** Intake, Planned, Build, Merge, Merged. Each has:
-  - a name and a muted subtitle
-  - a big count
-  - state pills with counts
-  - a few mini cards (number, state pill, title)
-- **Below them, two wide cards:** "Found by the factory" and "Blocked and parked".
-- **Phone:** the stages stack in one column.
+The Board is where the owner watches every work item move through the factory, the way a project
+board shows tickets moving across columns. It reads Archon's own item state (the `work/<n>`
+document, projected into `mc.work_item_states`) and the live runs, not only GitHub issues and pull
+requests. This section replaces the Board text of 2026-11-08 and wins over `mockup.html` and
+screenshots `20` and `42`.
+
+- **Pipeline** (default), with a Table alternative. Work orders stay on top as today: name,
+  "work order · lands on <target>", a progress bar in state colors, and "N of M merged · building ·
+  needs you". The strip counts work done, not pull requests: it reads "N of M done", where M counts
+  the order's work items but those closed as not planned or a duplicate, and N those closed as
+  completed (by a merged pull request or by hand), so a finished order reads "M of M done" with a
+  full bar (owner audit 2026-11-14). Only orders with work left get a card. Finished orders fold
+  into one muted row under them, "5 finished orders: attention-cleanup, attention-followups, …", which
+  expands in place to their cards and remembers whether it was open; with no open order the row
+  shows alone. The stage columns start in the first screen at 1440 x 900 with the Manager open
+  (owner audit 2026-11-14).
+- **Seven stage columns, left to right:** Intake, Planned, Build, Review, App check, Merge, Merged.
+  Each has a name, a muted subtitle (triage · waits for a build slot · build rounds · reviews · app
+  check · merge queue · last 7 days), a count, and state pills with counts.
+- **Width.** The Board is the one place exempt from the centered column of owner change 8: its
+  columns use the whole content width. Each column is at least 150 px wide, so all seven fit at
+  1440 px with the Manager closed; when they do not fit, the row scrolls sideways inside the Board,
+  the page itself never scrolls sideways, and the edge that hides columns shows a fade with the
+  hidden columns' names and counts ("Merge 0 · Merged 109 →"), which scrolls to them on click
+  (owner audit 2026-11-14).
+- **Every open work item is in exactly one place**, by the first rule that matches:
+  1. parked by a queue, or its stage is blocked or needs a contract: the wide
+     **Blocked and parked** card below the columns;
+  2. a run holds it: the column of that run's map card (Intake, Build, Review, App check or Merge).
+     An app-check run holds the item whose pull request it checks;
+  3. waiting on the owner: `facts.merge.status` asking goes to Merge, `facts.build.status` asking
+     goes to Build, an attention wait on any other run goes to the column of that run's map card;
+     each with the Needs you pill;
+  4. Ready (`facts.build.status` ready): App check until an app check passed at the pull request's
+     current head (the check's `head` equals the pull request's head), then Merge;
+  5. it has had a build round and is not Ready, including returned by the merge queue: Build;
+  6. triaged and workable: Planned;
+  7. otherwise: Intake.
+
+  Closed items merged by a pull request in the last 7 days are in Merged, newest first. Nothing open
+  drops off the board.
+- **A card shows, in this order:**
+  1. number and title
+  2. the state pill (Running, Needs you, Failed, Waiting, Queued, Blocked, Parked, Merged, as the
+     state table says)
+  3. "round N" and one dot per round. The finished rounds are `facts.build.rounds` (Archon's own
+     record, not a count of runs); while a build run holds the item, its round is N = finished + 1
+     and its dot is the live blue. A finished round's dot takes its `reason`: delivered teal, ask
+     violet, anything else grey. Hovering a dot says "Round K: <reason>, <R> reviews" and its
+     local time.
+  4. when a run holds the item: the workflow and its current step in mono
+     ("archon-build-queue · review__code"), linking to `/runs/<id>`, with the live dot
+  5. "returned ×N" when the merge queue sent it back N times (build decisions
+     "returned by the merge queue"), linking to the work item timeline
+  6. in Merged: "merged <local time>". Every merged card has one: the item's merge record, else
+     the merge time of the pull request that closes or names it (`Refs` included). Merged is
+     ordered by that time, newest first (owner audit 2026-11-14).
+  7. a failed or asking item's stop line (rule 3); in Blocked and parked, one muted line that says
+     what it waits on: the parked decision's reason, or "Blocked on #N" for its blocker, or "Needs a
+     contract" (owner audit 2026-11-14)
+- **Mini cards:** a column shows every item, not the first three; a column taller than the
+  viewport scrolls inside itself.
+- **A card opens the work item page.** Its timeline is unchanged.
+- **The board is live.** A new `work/<n>` revision or a run's next step moves or updates the card
+  within 5 seconds, with no reload.
+- **Below the columns:** "Blocked and parked" and "Found by the factory", as wide cards.
+- **Table:** the same items, with round, run and step, returned and merged time as columns.
+- **Phone:** the columns stack in one column, in the same order.
 
 ## Factory
 

@@ -5,7 +5,7 @@ import {
   RECONNECT_FIRST_MS,
   type SocketLike,
 } from './client';
-import { type Live, shareLive } from './LiveProvider';
+import { type Live, OFFLINE_AFTER_MS, shareLive } from './LiveProvider';
 
 type Listener = (event: { data?: unknown }) => void;
 
@@ -205,4 +205,57 @@ test('without it the provider asks GET /api/live and reports an error when that 
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test('a socket down OFFLINE_AFTER_MS is published offline, and online the moment it opens again', () => {
+  const states: Live[] = [];
+  const timers: { ms: number; then: () => void; cleared: boolean }[] = [];
+  let report: (event: 'up' | 'down') => void = () => {};
+  shareLive(
+    { factories: ['x'] },
+    (live) => states.push(live),
+    (_boot, connection) => {
+      report = connection;
+      return { subscribe: () => () => {}, close: () => {} };
+    },
+    (ms, then) => {
+      const timer = { ms, then, cleared: false };
+      timers.push(timer);
+      return () => {
+        timer.cleared = true;
+      };
+    },
+  );
+  const offline = () => states.map((s) => s.status === 'ready' && s.offline);
+  expect(offline()).toEqual([false]);
+  report('down');
+  report('down');
+  expect(timers.map((t) => t.ms)).toEqual([OFFLINE_AFTER_MS]);
+  // A socket back before the wait ends never shows offline.
+  report('up');
+  expect(timers[0]?.cleared).toBe(true);
+  expect(offline()).toEqual([false]);
+  report('down');
+  timers[1]?.then();
+  expect(offline()).toEqual([false, true]);
+  report('up');
+  expect(offline()).toEqual([false, true, false]);
+});
+
+test('the client reports up on each open and down on each loss, but not on close()', () => {
+  const sockets: TestSocket[] = [];
+  const events: string[] = [];
+  const client = createLiveClient(
+    () => {
+      const socket = new TestSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    { wait: (_ms, then) => then(), connection: (event) => events.push(event) },
+  );
+  sockets[0]?.fire('open');
+  sockets[0]?.fire('close');
+  sockets[1]?.fire('open');
+  client.close();
+  expect(events).toEqual(['up', 'down', 'up']);
 });

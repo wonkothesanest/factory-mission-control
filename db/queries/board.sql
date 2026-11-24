@@ -43,7 +43,7 @@ rounds AS (
 ),
 -- Each pull request's latest app check verdict, once.
 checks AS (
-  SELECT DISTINCT ON (s.pr_number) s.pr_number, s.output ->> 'overall' AS overall
+  SELECT DISTINCT ON (s.pr_number) s.pr_number, s.output ->> 'overall' AS overall, s.output ->> 'head' AS head
   FROM mc.lap_steps s
   JOIN mc.laps l ON l.run_id = s.run_id
   WHERE l.factory = $1 AND s.step_id IN ('check-app', 'check')
@@ -57,10 +57,15 @@ SELECT 'item' AS kind, i.number, i.title, i.url, i.state, i.closed_at,
   -- The route: the queue's state label (intake writes one, and a ready item's names its route),
   -- else the route the loop's latest claim took (the pick step's, else the claim's own).
   coalesce(rt.route, lp.route) AS route,
-  coalesce(rd.rounds, 0) AS rounds,
+  -- Archon's finished rounds when the item has a work/<n> state, else the runs that reached ship.
+  coalesce(jsonb_array_length(st.rounds), rd.rounds, 0) AS rounds,
   ac.overall AS app_check,
-  pr.number AS pr, pr.open AS pr_open,
+  pr.number AS pr, linked.open AS pr_open,
   st.build_status, st.build_at, st.merge_status, st.merge_at, st.triage_at, st.stage,
+  st.rounds::text AS round_list, st.returns, st.last_decision, st.parked_reason, st.blockers,
+  pr.head_sha AS pr_head, ac.head AS app_check_head,
+  CASE WHEN st.merge_status = 'merged' AND st.merge_at >= coalesce(st.build_at, '') AND st.merge_at >= coalesce(st.triage_at, '') THEN st.merge_at ELSE CASE WHEN landed.at IS NULL THEN NULL ELSE lpad(extract(year FROM (landed.at AT TIME ZONE 'UTC'))::int::text, 4, '0') || '-' || lpad(extract(month FROM (landed.at AT TIME ZONE 'UTC'))::int::text, 2, '0') || '-' || lpad(extract(day FROM (landed.at AT TIME ZONE 'UTC'))::int::text, 2, '0') || 'T' || date_trunc('second', (landed.at AT TIME ZONE 'UTC'))::time::text || '.' || lpad((floor(extract(milliseconds FROM (landed.at AT TIME ZONE 'UTC')))::bigint % 1000)::text, 3, '0') || 'Z' END END AS merged_at,
+  ar.run_id AS app_check_run,
   NULL::text AS repository, NULL::integer AS merged_total
 FROM items i
 LEFT JOIN LATERAL (
@@ -84,28 +89,79 @@ LEFT JOIN LATERAL (
 ) lp ON true
 LEFT JOIN rounds rd ON rd.number = i.number
 LEFT JOIN LATERAL (
+  -- The queues' own state for the item (Archon's work/<n> document), as the Board's parked rule reads it.
+  SELECT w.build_status, w.build_at, w.merge_status, w.merge_at, w.triage_at, w.stage,
+    w.rounds, w.returns, w.last_decision, w.parked_reason, w.pr_number,
+    -- The parked decision's blockers, else (a stage 'blocked' item the queues stopped) its open `Depends on`:
+    -- not closed as an issue and not closed or merged as a pull request, as unstick.sql counts them gone.
+    CASE WHEN cardinality(pb.items) > 0 OR w.stage IS DISTINCT FROM 'blocked' THEN pb.items ELSE dp.items END AS blockers
+  FROM mc.work_item_states w
+  JOIN mc.factories f ON f.codebase = w.project_key
+  CROSS JOIN LATERAL (
+    SELECT coalesce(array_agg(k.blocker ORDER BY k.blocker), '{}'::int[]) AS items FROM mc.work_item_blockers k
+    WHERE k.project_key = w.project_key AND k.number = w.number
+  ) pb
+  CROSS JOIN LATERAL (
+    SELECT coalesce(array_agg(d.depends_on ORDER BY d.depends_on), '{}'::int[]) AS items FROM mc.issue_dependencies d
+    WHERE d.factory = f.name AND d.issue_number = w.number
+      AND NOT EXISTS (SELECT 1 FROM mc.issues di WHERE di.factory = d.factory AND di.number = d.depends_on AND di.state = 'closed')
+      AND NOT EXISTS (SELECT 1 FROM mc.pull_requests dr WHERE dr.factory = d.factory AND dr.number = d.depends_on AND dr.state = 'closed')
+  ) dp
+  WHERE f.name = i.factory AND w.number = i.number
+) st ON true
+LEFT JOIN LATERAL (
   -- The open pull request that closes the item (the lowest), else the merged one (the highest).
-  SELECT p.number, p.state = 'open' AS open
+  SELECT p.number, p.state = 'open' AS open, p.head_sha
   FROM mc.pull_request_issues pi
   JOIN mc.pull_requests p ON p.factory = pi.factory AND p.number = pi.pr_number
   WHERE pi.factory = i.factory AND pi.issue_number = i.number
     AND (p.state = 'open' OR p.merged_at IS NOT NULL)
   ORDER BY (p.state = 'open') DESC, CASE WHEN p.state = 'open' THEN -p.number ELSE p.number END DESC
   LIMIT 1
+) linked ON true
+LEFT JOIN LATERAL (
+  -- The pull request Archon's last round opened, as a Refs-only pull request has no Closes link.
+  SELECT p.number, p.state = 'open' AS open, p.head_sha, p.merged_at
+  FROM mc.pull_requests p
+  WHERE p.factory = i.factory AND p.number = st.pr_number
+    AND (p.state = 'open' OR p.merged_at IS NOT NULL)
+) projected ON true
+LEFT JOIN LATERAL (
+  -- One pull request, so number and head never describe different ones: the open linked
+  -- pull request, else the projected one, else the linked one that landed. A plain select with no set
+  -- operation, as Realtime refuses one whose operands read the outer row.
+  SELECT
+    CASE WHEN linked.open THEN linked.number WHEN projected.number IS NOT NULL THEN projected.number ELSE linked.number END AS number,
+    CASE WHEN linked.open THEN linked.head_sha WHEN projected.number IS NOT NULL THEN projected.head_sha ELSE linked.head_sha END AS head_sha
 ) pr ON true
+LEFT JOIN LATERAL (
+  -- The latest merged pull request that closes the item (whatever `pr` shows, which may be an open one), else the latest
+  -- merged one that names it with `Refs` (an older item has no Closes link and no pr_number), else the projected pull
+  -- request if it merged and has neither link. Only a closed item shows it, and the `items` CTE gates its close reason.
+  SELECT coalesce(
+    (SELECT max(m.merged_at) FROM mc.pull_request_issues x
+     JOIN mc.pull_requests m ON m.factory = x.factory AND m.number = x.pr_number
+     WHERE x.factory = i.factory AND x.issue_number = i.number),
+    (SELECT max(rm.merged_at) FROM mc.pull_request_references rf
+     JOIN mc.pull_requests rm ON rm.factory = rf.factory AND rm.number = rf.pr_number
+     WHERE rf.factory = i.factory AND rf.issue_number = i.number AND rm.merged_at IS NOT NULL),
+    projected.merged_at) AS at
+) landed ON true
 LEFT JOIN checks ac ON ac.pr_number = pr.number
 LEFT JOIN LATERAL (
-  -- The queues' own state for the item (Archon's work/<n> document), as the Board's parked rule reads it.
-  SELECT w.build_status, w.build_at, w.merge_status, w.merge_at, w.triage_at, w.stage
-  FROM mc.work_item_states w
-  JOIN mc.factories f ON f.codebase = w.project_key
-  WHERE f.name = i.factory AND w.number = i.number
-) st ON true
+  -- The running app check on the item's pull request: the map's lap rows carry no issue number for them.
+  SELECT l.run_id
+  FROM mc.laps l
+  JOIN mc.lap_steps sel ON sel.run_id = l.run_id AND sel.step_id = 'select'
+  WHERE l.factory = i.factory AND l.workflow_name = 'factory-app-check' AND l.status = 'running'
+    AND sel.pr_number = pr.number
+  ORDER BY l.started_at DESC NULLS LAST, l.run_id LIMIT 1
+) ar ON true
 UNION ALL
 -- One row for the factory: where "N older" points, and how many work items a merged pull
 -- request closed or named with `Refs` in all, of which only the newest 200 are above.
 SELECT 'factory', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-  NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
   f.repository,
   (SELECT count(*)::int FROM mc.issues i
    WHERE i.factory = f.name AND i.state = 'closed' AND coalesce(i.close_reason, 'completed') NOT IN ('not_planned', 'duplicate') AND (EXISTS (

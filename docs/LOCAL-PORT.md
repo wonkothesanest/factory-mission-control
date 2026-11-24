@@ -2,9 +2,12 @@
 
 This checkout is factory-mission-control (upstream `f301af0d`, the first commit here) ported to run
 entirely on this machine for the local factory: no Neon, no GitHub, the factory's own
-Postgres and local forge, served on `127.0.0.1:3092`. In the private history each later commit was one part of the port; this public snapshot squashes them into one commit.
+Postgres and local forge, served on `127.0.0.1:3092`. The port's own commits are squashed: each update of this branch is one commit on the previous one.
 
-> **Public snapshot note.** This port was built inside a private project. Paths this document names outside this repository (`bin/factory-up`, `forge/`, `secrets/`, `proof/*.png`), the verification evidence under `docs/evidence/local-port/`, the factory list `factories.local.json`, and the commit IDs it cites belong to that project and are not included here.
+> **Snapshot note.** This port runs inside a larger local factory setup (Archon, a local forge, a Postgres container and the scripts that start them). Paths this document names outside this repository (`bin/factory-up`, `forge/`, `secrets/`, `proof/*.png`) belong to that setup, and the verification evidence under `docs/evidence/local-port/` and the commit IDs it cites are not included. The factory list `factories.local.json` is each install's own: copy `factories.local.example.json` to start yours (git ignores it).
+
+Upstream updates arrive as pristine import commits on the `vendor/upstream` branch, merged into
+`main` (first: upstream `3b859e4f`, 2026-11-23).
 
 ## Run it
 
@@ -29,7 +32,7 @@ dashboards/mission-control/start.sh          # foreground; bin/factory-up runs i
 | What | Where |
 |---|---|
 | UI, API, live socket | `http://localhost:3092`, `/api/health`, `/api/live`, `/api/forge`, `ws://localhost:3092/api/live/socket` |
-| Factories shown | `factories.local.json`: `widgets`, `gadgets` (Archon codebases `example/<repo>`) and `sandbox` (the `authcheck` smoke-test codebase). |
+| Factories shown | `factories.local.json`, the operator's own list (`MC_FACTORIES_FILE` overrides the path). Start from `factories.local.example.json`: one entry per factory with `name`, `repository` (the forge's `owner/name`), `codebase` (Archon's codebase name), `console` and optionally `code_web`. `start.sh` stops with a hint when the file is missing. |
 | Schemas FMC writes | `mc` (the dashboard), `mc_guard` (guards and shadow tables), `mc_meta` (migration ledger, NOTIFY function). Nothing in `public`. |
 | Files FMC reads, never writes | `forge/state/forge.db` (opened read-only), `apps/<repo>/factory/pack.json` and `git log` there, `cache/factory/archon/<sha>/.archon/workflows`, `upstream/ai-software-factory/template` |
 | Temp files and caches | This checkout's `.tmp/` only (`TMPDIR`, `XDG_CACHE_HOME`, bun's install and transpiler caches, from `bin/context.sh`), for everything FMC spawns. Not `$HOME`, and not the factory's `cache/`. The one exception is the Manager's Claude CLI when a person asks it something ("The Manager", below). |
@@ -209,6 +212,8 @@ forge proofs make their own `scratch-*` databases and drop them.
 
 Tests: `bun run check` (typecheck, lint, map check, the whole offline suite on PGlite and headless
 Chrome). On 2026-11-13: typecheck and map check clean; 2067 pass, 1 skip, 0 fail across 138 files.
+After the merge with upstream `3b859e4f` (2026-11-23): typecheck, biome (no errors) and map check
+clean; 2310 pass, 2 skip, 0 fail across 148 files; `restart-test.ts` 8/8 and `safety-test.ts` 15/15.
 
 Headless Chrome (the browser tests, `scripts/lib/cdp.ts`) gets `CHROME_CONFIG_HOME` and
 `XDG_CONFIG_HOME` set to its throwaway profile. Without them Chrome's crash reporter updates
@@ -259,10 +264,21 @@ at 1600 px on 22 addresses. Screenshots are in `proof/mission-control-*.png`.
   only on `pg_temp`, with AccessShare locks on Archon's tables, which never conflict with Archon's
   writes.
 - Decisions and verdicts are empty (they came from the versions repository).
-- `test:live` (Neon Realtime timing and probe checks on a check branch) is removed, not ported.
-- Actions (answer or resume a paused run through Archon's CLI) need `.mc-local/operators.json`.
-  Without it the dashboard shows console links only. When configured, the action CLI gets `.tmp/`
-  temp and cache paths, but its home is whatever `operators.json` gives it.
+- `test:live` (Neon Realtime timing and probe checks on a check branch) is removed, not ported,
+  with its fixtures (`scripts/live/`, the refused-socket fixture).
+- A page says it cannot connect once the live socket has stayed down `OFFLINE_AFTER_MS` (16 s);
+  upstream's offline notice, re-implemented on the local live socket (`app/live/LiveProvider.tsx`).
+- Actions need `.mc-local/operators.json` (or `MC_OPERATORS_FILE`), with an entry per factory.
+  They are upstream's five writes (`server/actions.ts`): answer or resume a paused run, and, since
+  upstream `5f2923a`, re-triage, close and comment on a work item. Without the file every action
+  is off and the dashboard shows console links only; re-triage and comment also need the entry's
+  `login`. Every write runs the operator's own Archon CLI (`workflow answer|resume|run`, `forge
+  workitem.label.add|workitem.close|workitem.comment.upsert`); nothing in the dashboard calls a
+  forge's API. Here the CLI's `forge` operations go to the **local forge** only, as the factory's
+  laps do: no write reaches GitHub. `FORGE_HOST = 'github.com'` in `server/actions.ts` is the local
+  forge's GitHub-shaped repository identity (its repositories are named as github.com ones), not
+  a network host. When configured, the action CLI gets `.tmp/` temp and cache paths, but its home
+  is whatever `operators.json` gives it.
 - `mc.rewind_branches` is dropped by a migration. The `0008_rewind_branches.sql` file stays, because
   the ledger records migrations by name.
 - `biome check` reports an internal error on `app/components/ui/ui.test.tsx` (an upstream file saved

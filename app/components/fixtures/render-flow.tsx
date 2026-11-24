@@ -15,6 +15,8 @@ const VERSION_ROW: HomeMapRow = {
   url: null,
   at: null,
   prs: null,
+  stop_line: null,
+  asks: null,
 };
 
 /** A live socket that answers `home-map` with its one version row, and every other query no rows. */

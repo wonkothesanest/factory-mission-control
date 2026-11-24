@@ -12,7 +12,7 @@ import type { FactoryScorecardRow } from '../app/lib/factory-scorecard';
 import type { FailureGroupRow, RetriedRunRow } from '../app/lib/failures';
 import type { HealthRunRow, HealthStepRow, HealthWorkableRow } from '../app/lib/health';
 import type { LapMapRow } from '../app/lib/lap-graph';
-import type { HandledRow } from '../app/lib/manager';
+import type { HandledRow, ManagerHandledRow } from '../app/lib/manager';
 import type { CheckLineRow, OneLapRow, StepAttemptRow } from '../app/lib/one-lap';
 import type { OwnerQueueRow } from '../app/lib/owner-queue';
 import type { RunsRow } from '../app/lib/runs';
@@ -118,8 +118,10 @@ const ROW_COLUMNS: Record<string, string[]> = {
     'confidence',
     'recommendation_why',
     'item_number',
+    'item_title',
     'message',
     'console',
+    'steps',
   ]),
   unstick: columns<UnstickRow>()([
     'kind',
@@ -129,19 +131,26 @@ const ROW_COLUMNS: Record<string, string[]> = {
     'waits_on',
     'since',
     'action',
-    'repository',
+    'title',
+    'blocker_titles',
+    'reason',
     'console',
+    'open',
+    'sent_action',
+    'sent_at',
   ]),
   handled: columns<HandledRow>()([
     'id',
     'action',
     'run_id',
+    'item_number',
     'option',
     'from_step',
     'sent_at',
     'exit_code',
     'workflow_name',
   ]),
+  'manager-handled': columns<ManagerHandledRow>()(['run_id', 'completed_at', 'answered']),
   'manager-sweep': columns<SweepRow>()(['swept_at']),
   'factory-switcher': columns<FactorySwitcherRow>()(['factory', 'running', 'is_default']),
   'health-runs': columns<HealthRunRow>()([
@@ -234,6 +243,15 @@ const ROW_COLUMNS: Record<string, string[]> = {
     'merge_at',
     'triage_at',
     'stage',
+    'round_list',
+    'returns',
+    'last_decision',
+    'parked_reason',
+    'blockers',
+    'pr_head',
+    'app_check_head',
+    'merged_at',
+    'app_check_run',
     'repository',
     'merged_total',
   ]),
@@ -248,6 +266,8 @@ const ROW_COLUMNS: Record<string, string[]> = {
     'url',
     'at',
     'prs',
+    'stop_line',
+    'asks',
   ]),
   'one-lap-checks': columns<CheckLineRow>()([
     'position',
@@ -442,6 +462,7 @@ const ROW_COLUMNS: Record<string, string[]> = {
     'name',
     'total_count',
     'open_count',
+    'done_count',
     'merged_count',
     'lands_on',
     'last_closed_at',
@@ -461,7 +482,11 @@ const ROW_COLUMNS: Record<string, string[]> = {
 const VOLATILE =
   /\b(now|random|clock_timestamp|statement_timestamp|transaction_timestamp|timeofday|gen_random_uuid|nextval|current_timestamp|current_date|current_time|localtime|localtimestamp)\b/i;
 
-/** Set-returning functions; Realtime refuses them as a query source (REALTIME.md). */
+/**
+ * Set-returning functions, banned in a live query by project rule (REALTIME.md). Realtime accepted the
+ * constant `generate_series(0, 1)` probe on 2026-11-13, but #402's query expanding a JSON column with
+ * `jsonb_array_elements` was refused, and no other set-returning shape is probed.
+ */
 const SET_RETURNING =
   /\b(generate_series|generate_subscripts|unnest|jsonb?_array_elements(_text)?|jsonb?_each(_text)?|jsonb?_object_keys|jsonb?_to_recordset|jsonb?_populate_recordset|jsonb?_path_query(_array)?|regexp_matches|regexp_split_to_table|string_to_table|json_table|pg_ls_dir|pg_stat_get_activity|pg_show_all_settings)\s*\(/i;
 
@@ -585,12 +610,21 @@ describe('the rules the live queries restate, which they may not call a function
     }
   });
 
+  // The Board's close-reason gate: one declaration for every copy that restates it.
+  const CLOSE_REASON_GATE = String.raw`coalesce\(i\.close_reason, 'completed'\) NOT IN \('not_planned', 'duplicate'\)`;
+
   test('merged is closed, not as not planned or a duplicate, with a merged pull request that closes or Refs it, in every copy', () => {
-    const NOT_DELIVERED =
-      /i\.state = 'closed'\s+AND coalesce\(i\.close_reason, 'completed'\) NOT IN \('not_planned', 'duplicate'\)/g;
+    const NOT_DELIVERED = new RegExp(
+      String.raw`i\.state = 'closed'\s+AND ${CLOSE_REASON_GATE}`,
+      'g',
+    );
     // The delivery branches as one predicate: a merged PR that closes the item, or one that Refs it.
     const DELIVERED =
       /AND \(EXISTS \(\s*SELECT 1 FROM mc\.pull_request_issues pi\s+JOIN mc\.pull_requests p ON p\.factory = pi\.factory AND p\.number = pi\.pr_number\s+WHERE pi\.factory = i\.factory AND pi\.issue_number = i\.number AND p\.merged_at IS NOT NULL\s*\) OR EXISTS \(\s*SELECT 1 FROM mc\.pull_request_references rf\s+JOIN mc\.pull_requests p ON p\.factory = rf\.factory AND p\.number = rf\.pr_number\s+WHERE rf\.factory = i\.factory AND rf\.issue_number = i\.number AND p\.merged_at IS NOT NULL\s*\)\)/g;
+    // work-orders.sql counts the two branches in lateral joins, since Realtime refuses a subquery
+    // inside an aggregate's FILTER: the same two branches, read as `mp.n > 0 OR mr.n > 0`.
+    const DELIVERED_COUNTED =
+      /AND \(mp\.n > 0 OR mr\.n > 0\)[\s\S]*rf\.factory = i\.factory AND rf\.issue_number = i\.number AND p\.merged_at IS NOT NULL/g;
     // The closing branch alone, so a copy in the pre-Refs form is counted too.
     const BY_CLOSING = 'pi.issue_number = i.number AND p.merged_at IS NOT NULL';
     // [copies] per name; a live query not listed here may state the rule nowhere.
@@ -599,15 +633,52 @@ describe('the rules the live queries restate, which they may not call a function
       'work-orders': 1,
       'product-documents': 1,
     };
+    // work-orders.sql restates the closed-and-not-excluded gate for its done and total counts too.
+    const gates: Record<string, number> = { 'work-orders': 3 };
     for (const [name, sql] of queries) {
       const expected = copies[name] ?? 0;
       expect([
         name,
         count(sql, NOT_DELIVERED),
-        count(sql, DELIVERED),
+        count(sql, DELIVERED) + count(sql, DELIVERED_COUNTED),
         count(sql, BY_CLOSING),
-      ]).toEqual([name, expected, expected, expected]);
+      ]).toEqual([name, gates[name] ?? expected, expected, expected]);
     }
+  });
+
+  test('a merged pull request that Refs the item counts as delivering it in every query that reads the link', () => {
+    // The Refs branch alone, whatever the item is matched by: work-item.sql and one-lap.sql restate it
+    // for one item, so the delivered-predicate regexes above cannot see them.
+    const REFS_MERGED =
+      /FROM mc\.pull_request_references rf\s+JOIN mc\.pull_requests (\w+) ON \1\.factory = rf\.factory AND \1\.number = rf\.pr_number\s+WHERE rf\.factory = [\w.$]+ AND rf\.issue_number(?:::text)? = [\w.$]+ AND \1\.merged_at IS NOT NULL/g;
+    const copies: Record<string, number> = {
+      board: 3,
+      'work-orders': 1,
+      'product-documents': 1,
+      'work-item': 1,
+      'one-lap': 1,
+    };
+    for (const [name, sql] of queries) {
+      expect([name, count(sql, REFS_MERGED), count(sql, /pull_request_references/g)]).toEqual([
+        name,
+        copies[name] ?? 0,
+        copies[name] ?? 0,
+      ]);
+    }
+    // one-lap.sql's Refs arm carries the Board's close-reason gate on the same item row.
+    expect(
+      count(
+        query('one-lap'),
+        new RegExp(String.raw`rm\.merged_at IS NOT NULL\s+AND ${CLOSE_REASON_GATE}`, 'g'),
+      ),
+    ).toBe(1);
+    // and so does its Closes arm.
+    expect(
+      count(
+        query('one-lap'),
+        new RegExp(String.raw`x\.issue_number = item\.issue\s+AND ${CLOSE_REASON_GATE}`, 'g'),
+      ),
+    ).toBe(1);
   });
 
   test('a build-queue lap is a run whose facts step names an item, in every copy of the rule', () => {

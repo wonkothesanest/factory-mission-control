@@ -22,14 +22,10 @@ describe('the unstick query on the seed', () => {
     const rows = await db.query(UNSTICK, ['queue-factory']);
     const u = QUEUE_UNSTICK;
     const found = rows.map((r) => r as unknown as UnstickRow);
-    const [factory] = await db.query(
-      'SELECT repository, console FROM mc.factories WHERE name = $1',
-      ['queue-factory'],
-    );
-    for (const r of found) {
-      expect(r.repository).toBe(String(factory?.repository));
-      expect(r.console).toBe(String(factory?.console));
-    }
+    const [factory] = await db.query('SELECT console FROM mc.factories WHERE name = $1', [
+      'queue-factory',
+    ]);
+    for (const r of found) expect(r.console).toBe(String(factory?.console));
     expect(new Set(found.map((r) => r.kind))).toEqual(new Set(UNSTICK_KINDS));
     expect(new Set(found.map((r) => r.action))).toEqual(new Set(UNSTICK_ACTIONS));
     expect(
@@ -66,7 +62,7 @@ describe('the unstick query on the seed', () => {
         run_id: QUEUE_RUNS.built,
         waits_on: 'a claim held by a finished run',
         since: expect.any(String) as unknown as string,
-        action: 'release_claim',
+        action: 'retriage',
       },
       {
         kind: 'parked',
@@ -77,6 +73,54 @@ describe('the unstick query on the seed', () => {
         action: 'retriage',
       },
     ]);
+  });
+
+  test('names the item, what it waits on and why it was parked, so a card can say it in words', async () => {
+    const u = QUEUE_UNSTICK;
+    const rows = (await db.query(UNSTICK, ['queue-factory'])) as unknown as UnstickRow[];
+    const of = (kind: string) => rows.find((r) => r.kind === kind);
+    expect(of('parked')).toMatchObject({
+      title: `Queue issue ${u.parkedMerged.issue}`,
+      blocker_titles: [`Queue issue ${u.parkedMerged.blocker}`],
+      reason: u.parkedReason,
+      open: true,
+    });
+    expect(of('blocked')).toMatchObject({
+      title: `Queue issue ${u.blockedMerged.issue}`,
+      blocker_titles: [`Queue issue ${u.blockedMerged.blocker}`],
+      reason: null,
+      open: true,
+    });
+    expect(of('capacity')).toMatchObject({
+      blocker_titles: null,
+      reason: null,
+      open: false,
+    });
+    expect(of('claim')).toMatchObject({
+      blocker_titles: null,
+      reason: null,
+      open: false,
+    });
+  });
+
+  test('reads a claim or capacity item as open once the mirror holds its issue open', async () => {
+    const number = QUEUE_UNSTICK.claimed.issue;
+    const at = '2026-10-24T09:08:00.000Z';
+    await db.query(
+      `INSERT INTO mc.issues (factory, number, title, state, url, created_at, updated_at)
+       VALUES ('queue-factory', $1, 'open item', 'open', $2, $3, $3)`,
+      [number, `https://github.com/example/queue-factory/issues/${number}`, at],
+    );
+    try {
+      const rows = (await db.query(UNSTICK, ['queue-factory'])) as unknown as UnstickRow[];
+      const of = (kind: string) => rows.find((r) => r.kind === kind);
+      expect(of('capacity')).toMatchObject({ number, open: true });
+      expect(of('claim')).toMatchObject({ number, open: true });
+    } finally {
+      await db.query(`DELETE FROM mc.issues WHERE factory = 'queue-factory' AND number = $1`, [
+        number,
+      ]);
+    }
   });
 
   test('flags nothing for an item whose blocker is still open, and runs on a factory without any', async () => {
@@ -144,5 +188,121 @@ describe('the unstick query on the seed', () => {
     const rows = await db.query(UNSTICK, ['queue-factory']);
     const added = rows.filter((r) => Number(r.number) >= 470 && Number(r.number) <= 481);
     expect(added.map((r) => [r.number, r.waits_on])).toEqual([[479, '#480, #481']]);
+  });
+
+  describe('a write sent from the dashboard that the mirror has not caught up with', () => {
+    const number = QUEUE_UNSTICK.blockedMerged.issue;
+    const sentOf = async () => {
+      const rows = (await db.query(UNSTICK, ['queue-factory'])) as unknown as UnstickRow[];
+      const [blocked] = rows.filter((r) => r.number === number);
+      expect(rows.filter((r) => r.number !== number).every((r) => r.sent_action === null)).toBe(
+        true,
+      );
+      return [blocked?.sent_action, blocked?.sent_at?.toISOString() ?? null];
+    };
+    const write = (
+      action: string,
+      at: string | null,
+      exit: number | null,
+      finished: string | null = at,
+    ) =>
+      db.query(
+        `INSERT INTO mc.actions (factory, who, action, item_number, comment_text, undone, sent_at, exit_code, finished_at)
+         VALUES ('queue-factory', 'owner', $1, $2, $3, $4, $5, $6, $7)`,
+        [action, number, action === 'comment' ? 'hello' : null, at === null, at, exit, finished],
+      );
+    const clean = async () => {
+      await db.query(
+        `DELETE FROM mc.actions WHERE factory = 'queue-factory' AND item_number = $1`,
+        [number],
+      );
+      await db.query(`DELETE FROM mc.laps WHERE run_id = '5eed0690-0000-4000-8000-000000000001'`);
+    };
+    const T1 = '2026-11-13T14:00:00.000Z';
+    const T2 = '2026-11-13T14:02:00.000Z';
+
+    test('names the latest write that was sent, not undone and exited 0', async () => {
+      try {
+        expect(await sentOf()).toEqual([null, null]);
+        await write('retriage', T1, 0);
+        expect(await sentOf()).toEqual(['retriage', T1]);
+        await write('close', T2, 0);
+        expect(await sentOf()).toEqual(['close', T2]);
+        await write('comment', '2026-11-13T14:03:00.000Z', 0);
+        expect((await sentOf())[0]).toBe('comment');
+      } finally {
+        await clean();
+      }
+    });
+
+    test('does not count an undone write, a failed one or one with no exit yet', async () => {
+      try {
+        await write('retriage', null, null);
+        await write('retriage', T1, 1);
+        await write('retriage', T2, null);
+        expect(await sentOf()).toEqual([null, null]);
+      } finally {
+        await clean();
+      }
+    });
+
+    test('ends when an intake run on the item has finished since the write', async () => {
+      const lap = (completed: string | null) =>
+        db.query(
+          `INSERT INTO mc.laps (run_id, factory, workflow_name, status, started_at, completed_at, issue_number)
+           VALUES ('5eed0690-0000-4000-8000-000000000001', 'queue-factory', 'archon-intake', $1, $2, $3, $4)`,
+          [completed === null ? 'running' : 'completed', T2, completed, number],
+        );
+      try {
+        await write('retriage', T1, 0);
+        await lap(null);
+        expect(await sentOf()).toEqual(['retriage', T1]);
+        await db.query(
+          `UPDATE mc.laps SET status = 'completed', completed_at = $1 WHERE run_id = $2`,
+          ['2026-11-13T14:05:00.000Z', '5eed0690-0000-4000-8000-000000000001'],
+        );
+        expect(await sentOf()).toEqual([null, null]);
+      } finally {
+        await clean();
+      }
+    });
+
+    test('keeps a write sent after an intake run that started before it', async () => {
+      try {
+        await write('retriage', T2, 0);
+        await db.query(
+          `INSERT INTO mc.laps (run_id, factory, workflow_name, status, started_at, completed_at, issue_number)
+           VALUES ('5eed0690-0000-4000-8000-000000000001', 'queue-factory', 'archon-intake', 'completed', $1, $2, $3)`,
+          [T1, '2026-11-13T14:05:00.000Z', number],
+        );
+        expect(await sentOf()).toEqual(['retriage', T2]);
+      } finally {
+        await clean();
+      }
+    });
+
+    test('keeps a sent close that only its own note has moved, and ends it once the issue moves after the CLI returned', async () => {
+      const [issue] = await db.query(
+        `SELECT updated_at FROM mc.issues WHERE factory = 'queue-factory' AND number = $1`,
+        [number],
+      );
+      const before = issue?.updated_at;
+      const touch = (at: unknown) =>
+        db.query(
+          `UPDATE mc.issues SET updated_at = $1 WHERE factory = 'queue-factory' AND number = $2`,
+          [at, number],
+        );
+      try {
+        await write('close', T1, 0, T2);
+        expect(await sentOf()).toEqual(['close', T1]);
+        await touch('2026-11-13T14:01:00.000Z');
+        expect(await sentOf()).toEqual(['close', T1]);
+        await touch('2026-11-13T14:03:00.000Z');
+        expect(await sentOf()).toEqual([null, null]);
+      } finally {
+        await touch(before);
+        await clean();
+      }
+    });
   });
 });

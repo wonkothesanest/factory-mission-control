@@ -7,9 +7,10 @@ import { parsePack, type Step } from '../../parsers/pack';
 import { AppCheckList, Behind, MapDetails, RightNow } from '../components/MapDetails';
 import type { AppCheckRow } from '../lib/app-check';
 import type { StepRow } from '../lib/step-detail';
+import { msToLocalMidnight } from '../live/use-today';
 import { FACTORY_MAP, workflowFile } from '../map/factory-map';
 import { type CardLive, cardLive, type HomeMapRow, type MapSources } from '../map/live';
-import Home, { HomeMapBody, msToLocalMidnight } from './f.$factory.map';
+import Home, { HomeMapBody } from './f.$factory.map';
 
 const REPO = join(import.meta.dir, '..', '..');
 
@@ -64,6 +65,8 @@ const lap = (run: string, step: string): HomeMapRow => ({
   url: null,
   at: null,
   prs: null,
+  stop_line: null,
+  asks: null,
 });
 
 const cardTag = (html: string, id: string) =>
@@ -152,6 +155,7 @@ test('Right now lists the gate outcomes, the latest deploy or that there is none
     name: 'combat',
     total_count: 1,
     open_count: 1,
+    done_count: 0,
     merged_count: 0,
     lands_on,
     last_closed_at: null,
@@ -244,6 +248,8 @@ test('queued, failing, waiting and merged chips sit on Build, App check, the Man
               url: null,
               at: null,
               prs: null,
+              stop_line: null,
+              asks: null,
             },
             {
               kind: 'merged',
@@ -255,6 +261,8 @@ test('queued, failing, waiting and merged chips sit on Build, App check, the Man
               url: null,
               at: new Date(2026, 10, 3, 9),
               prs: null,
+              stop_line: null,
+              asks: null,
             },
           ],
           workable: [{ kind: 'issue', issue_number: 2, title: 'w', url: null, run_id: null }],
@@ -655,6 +663,7 @@ test('the Work order card counts its open work orders and says nothing with none
       name: 'combat',
       total_count: 3,
       open_count: 2,
+      done_count: 1,
       merged_count: 1,
       lands_on: 'staging',
       last_closed_at: null,
@@ -681,7 +690,7 @@ test('the Work order card counts its open work orders and says nothing with none
     ),
   );
   expect(right).toContain('combat');
-  expect(right).toContain('1 of 3 merged · lands on staging');
+  expect(right).toContain('1 of 3 done · lands on staging');
   const odd = { ...orders[0], name: 'a b&c' };
   const links = renderToStaticMarkup(
     <MemoryRouter>

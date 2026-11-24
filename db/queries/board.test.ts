@@ -44,15 +44,15 @@ test('the seed recount: each column and each work order bar equal the definition
   const columns = (v: Awaited<ReturnType<typeof view>>) =>
     Object.fromEntries(v.columns.map((c) => [c.id, c.items.map((i) => i.number)]));
   // mission-control at NOW. Open, by the rules in order: 9 has an open pull request and no run (Build,
-  // waiting for a run); 11 runs `build` (Build); 12 runs `check-app` (App check). 13 to 16 have no
-  // run and no open pull request and are not workable, so no column. 10 closed on 2026-10-20, inside
+  // waiting for a run); 11 runs `build` (Build); 12 runs `check-app` (App check). 13 has a round
+  // (Build); 14 to 16 have no run, no round and are not workable (Intake). 10 closed on 2026-10-20, inside
   // 7 days (Merged); the other merged-closed items (1, 2, 3, 5, 6, 7, 8) and 4, closed as completed
   // after #103 named it with `Refs`, are older.
   const mission = await view('mission-control');
   expect(columns(mission)).toEqual({
     queued: [],
-    intake: [],
-    build: [9, 11],
+    intake: [14, 15, 16],
+    build: [9, 11, 13],
     review: [],
     app: [12],
     merge: [],
@@ -63,8 +63,8 @@ test('the seed recount: each column and each work order bar equal the definition
   expect(mission.older).toBe(8);
   // foundations holds 5, 6, 7 (merged) and 9 (open); screens holds 10 (merged), 11, 12 and 14.
   expect(mission.orders).toMatchObject([
-    { name: 'foundations', merged: 3, total: 4, landsOn: 'main' },
-    { name: 'screens', merged: 1, total: 4, landsOn: 'staging' },
+    { name: 'foundations', done: 3, total: 4, landsOn: 'main' },
+    { name: 'screens', done: 1, total: 4, landsOn: 'staging' },
   ]);
   // The filter narrows the columns to the order, and leaves the panels.
   const screens = await view('mission-control', 'screens');
@@ -72,8 +72,8 @@ test('the seed recount: each column and each work order bar equal the definition
   expect(screens.orders).toEqual(mission.orders);
 
   // queue-factory: 401 is in triage and built (the build run is between steps), so Intake; 402 and
-  // 403 only have runs between steps, so no column; 404 and 405 are workable with no run (Queued);
-  // 410's running split run holds nothing, so it is Queued too, which makes 7 not in order, plus the
+  // 403 only have runs between steps, so Intake with 406; 404 and 405 are workable with no run (Queued);
+  // 410's running split run holds nothing, so it is Queued too, which makes 10 not in order, with 402, 403 and 406, plus the
   // two parked items of the Unstick fixture;
   // 406 is needs-owner, which a queue factory does not read, and is not workable. 410 is a product
   // document, 411 and 412 are its merged pieces and 413 its open one. 413's work item state says
@@ -81,18 +81,18 @@ test('the seed recount: each column and each work order bar equal the definition
   const queue = await view('queue-factory');
   expect(columns(queue)).toEqual({
     queued: [404, 405, 410],
-    intake: [401],
+    intake: [401, 402, 403, 406],
     build: [],
     review: [],
     app: [],
     merge: [],
     decision: [],
     merged: [411, 412],
-    parked: [413, ...UNSTICK_PARKED],
+    parked: [413, ...UNSTICK_PARKED, 450, 452].sort((a, b) => a - b),
   });
-  // The Unstick fixture's two stage-blocked items (450, 452) have no column but a home in the Pipeline.
+  // The Unstick fixture's two stage-blocked items (450, 452) are in the Parked column and the wide card.
   const blocked = [QUEUE_UNSTICK.blockedMerged.issue, QUEUE_UNSTICK.blockedOpen.issue];
-  expect(queue.notInOrder).toBe(7 + UNSTICK_PARKED.length + blocked.length);
+  expect(queue.notInOrder).toBe(10 + UNSTICK_PARKED.length + blocked.length);
   // The Pipeline holds every placed item once, and "Blocked and parked" holds the parked and blocked ones.
   const homes = queue.pipeline.flatMap((s) => s.items.map((i) => i.number));
   expect(new Set(homes).size).toBe(homes.length);
@@ -252,8 +252,6 @@ test('a Refs-delivered item is merged unless closed as not planned or a duplicat
       `INSERT INTO mc.pull_request_references (factory, pr_number, issue_number) VALUES ('mission-control', 9101, 13)`,
     );
     expect((await board()).find((r) => r.number === 13)).toMatchObject({ pr: null, pr_open: null });
-    const columns = (await view('mission-control')).columns;
-    expect(columns.some((c) => c.items.some((i) => i.number === 13))).toBe(false);
 
     for (const reason of ['not_planned', 'duplicate']) {
       await setReason(4, reason);
@@ -282,6 +280,66 @@ test('a Refs-delivered item is merged unless closed as not planned or a duplicat
     await db.query(`DELETE FROM mc.pull_request_references WHERE pr_number = 9101`);
     await db.query(
       `DELETE FROM mc.pull_requests WHERE factory = 'mission-control' AND number = 9101`,
+    );
+  }
+});
+
+test('a Refs-only item shows the latest merged Refs pull request’s time', async () => {
+  const merged = async () => (await missionItem(4))?.merged_at;
+  expect(await merged()).not.toBeNull();
+  await db.query(
+    `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at)
+     VALUES ('mission-control', 9106, 't', 'closed', '2031-01-02T03:04:05Z', 'r', 'u', now(), now()),
+       ('mission-control', 9107, 't', 'closed', '2030-01-01T00:00:00Z', 'r', 'u', now(), now())`,
+  );
+  await db.query(
+    `INSERT INTO mc.pull_request_references (factory, pr_number, issue_number) VALUES ('mission-control', 9106, 4), ('mission-control', 9107, 4)`,
+  );
+  try {
+    expect(await merged()).toBe('2031-01-02T03:04:05.000Z');
+  } finally {
+    await db.query(`DELETE FROM mc.pull_request_references WHERE pr_number IN (9106, 9107)`);
+    await db.query(
+      `DELETE FROM mc.pull_requests WHERE factory = 'mission-control' AND number IN (9106, 9107)`,
+    );
+  }
+});
+
+test('with several merged closing pull requests the card shows the latest merge, not the highest number’s', async () => {
+  const merged = async () => (await missionItem(10))?.merged_at;
+  expect(await merged()).toBe('2026-10-20T09:30:00.000Z');
+  await db.query(
+    `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at)
+     VALUES ('mission-control', 9201, 't', 'closed', '2026-01-01T00:00:00Z', 'e', 'u', now(), now())`,
+  );
+  await db.query(
+    `INSERT INTO mc.pull_request_issues (factory, pr_number, issue_number) VALUES ('mission-control', 9201, 10)`,
+  );
+  try {
+    expect(await merged()).toBe('2026-10-20T09:30:00.000Z');
+  } finally {
+    await db.query(`DELETE FROM mc.pull_request_issues WHERE pr_number = 9201`);
+    await db.query(
+      `DELETE FROM mc.pull_requests WHERE factory = 'mission-control' AND number = 9201`,
+    );
+  }
+});
+
+test('a merged projected pull request does not outrank the merged closing one', async () => {
+  await db.query(
+    `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at)
+     VALUES ('mission-control', 9203, 't', 'closed', '2026-02-02T00:00:00Z', 'p', 'u', now(), now())`,
+  );
+  await db.query(
+    `INSERT INTO mc.work_item_states (project_key, number, revision, pr_number)
+     SELECT codebase, 10, 1, 9203 FROM mc.factories WHERE name = 'mission-control'`,
+  );
+  try {
+    expect((await missionItem(10))?.merged_at).toBe('2026-10-20T09:30:00.000Z');
+  } finally {
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 10`);
+    await db.query(
+      `DELETE FROM mc.pull_requests WHERE factory = 'mission-control' AND number = 9203`,
     );
   }
 });
@@ -329,8 +387,10 @@ test('a parked work item is not workable, and a re-triage makes it workable agai
     (await view('queue-factory')).columns
       .find((c) => c.id === 'parked')
       ?.items.map((i) => i.number);
-  expect(await workable()).toEqual([404, 405, 410]);
-  expect(await parkedItems()).toEqual([QUEUE_PARKED.issue, ...UNSTICK_PARKED]);
+  expect(await workable()).toEqual([404, 405, 410, 450]);
+  expect(await parkedItems()).toEqual(
+    [QUEUE_PARKED.issue, ...UNSTICK_PARKED, 450, 452].sort((a, b) => a - b),
+  );
   try {
     await db.query(
       `UPDATE mc.work_item_states SET triage_at = '2026-10-24T10:00:00.000Z', revision = revision + 1
@@ -338,7 +398,7 @@ test('a parked work item is not workable, and a re-triage makes it workable agai
       [QUEUE_PARKED.issue],
     );
     expect(await workable()).toContain(QUEUE_PARKED.issue);
-    expect(await parkedItems()).toEqual(UNSTICK_PARKED);
+    expect(await parkedItems()).toEqual([...UNSTICK_PARKED, 450, 452].sort((a, b) => a - b));
   } finally {
     await db.query(
       `UPDATE mc.work_item_states SET triage_at = $2, revision = $3 WHERE number = $1`,
@@ -372,9 +432,14 @@ test('a run that has just taken a work item is running on the Board, here on the
     const board = await view('queue-factory');
     const column = (id: string) => board.columns.find((c) => c.id === id)?.items ?? [];
     expect(column('queued').map((i) => i.number)).not.toContain(404);
-    expect(column('build').find((i) => i.number === 404)?.chips).toContainEqual(
-      expect.objectContaining({ kind: 'round', state: 'running' }),
-    );
+    expect(column('build').find((i) => i.number === 404)).toMatchObject({
+      round: 1,
+      run: {
+        workflow: 'archon-build-queue',
+        step: 'route',
+        to: `/f/queue-factory/runs/${runId}`,
+      },
+    });
 
     const live = cardLive(
       FACTORY_MAP,
@@ -385,7 +450,7 @@ test('a run that has just taken a work item is running on the Board, here on the
       NOW,
     ).get('build');
     expect(live?.here.map((l) => l.issue?.number)).toContain(404);
-    expect(live?.queued?.map((i) => i.number)).toEqual([405, 410]);
+    expect(live?.queued?.map((i) => i.number)).toEqual([405, 410, 450]);
 
     const laps = await run<{ issue_number: number | null; step_id: string }>(
       'runs',
@@ -399,6 +464,308 @@ test('a run that has just taken a work item is running on the Board, here on the
   } finally {
     await db.query('ROLLBACK');
   }
+});
+
+test('an item a paused run waits on holds only by its claim or its facts step is on its run card with Needs you', async () => {
+  const waiting = [
+    { run: '5eed0715-0000-4000-8000-000000000001', item: 404, by: 'claim' },
+    { run: '5eed0715-0000-4000-8000-000000000002', item: 405, by: 'facts' },
+  ] as const;
+  await db.query('BEGIN');
+  try {
+    for (const { run: runId, item, by } of waiting) {
+      await db.query(
+        `INSERT INTO mc.laps (run_id, factory, workflow_name, status, started_at, attention_open)
+         VALUES ($1, 'queue-factory', 'archon-build-queue', 'paused', '2026-10-25T11:50:00Z', true)`,
+        [runId],
+      );
+      if (by === 'claim')
+        await db.query(
+          `INSERT INTO mc.claims (factory, issue_number, run_id, claimed_at)
+           VALUES ('queue-factory', $1, $2, '2026-10-25T11:50:00Z')`,
+          [item, runId],
+        );
+      else
+        await db.query(
+          `INSERT INTO mc.lap_steps (run_id, step_id, status, started_at, output)
+           VALUES ($1, 'facts', 'completed', '2026-10-25T11:51:00Z', $2)`,
+          [
+            runId,
+            JSON.stringify({
+              item: { repo: { host: 'github.com', path: 'coleam00/queue-factory' }, number: item },
+            }),
+          ],
+        );
+    }
+    const board = await view('queue-factory');
+    const decision = board.columns.find((c) => c.id === 'decision')?.items.map((i) => i.number);
+    expect(decision).toEqual(expect.arrayContaining([404, 405]));
+    const build = board.pipeline.find((s) => s.id === 'build')?.items;
+    expect(
+      build?.filter((i) => [404, 405].includes(i.number)).map((i) => [i.number, i.status]),
+    ).toEqual([
+      [404, 'needs you'],
+      [405, 'needs you'],
+    ]);
+  } finally {
+    await db.query('ROLLBACK');
+  }
+});
+
+const missionItem = async (number: number) =>
+  (await run<BoardRow>('board', 'mission-control')).find((r) => r.number === number);
+
+test("a work item's rounds are Archon's finished rounds, and the run count only stands in without a state", async () => {
+  expect(await missionItem(9)).toMatchObject({ rounds: 3, round_list: null, returns: null });
+  await db.query(
+    `INSERT INTO mc.work_item_states (project_key, number, revision, rounds, returns, last_decision)
+     SELECT codebase, 9, 1, '[{"at":"a","reason":"ask","reviews":0,"run_id":"r1"},{"at":"b","reason":"delivered","reviews":2,"run_id":"r2"}]',
+       3, 'returned by the merge queue' FROM mc.factories WHERE name = 'mission-control'`,
+  );
+  try {
+    const row = await missionItem(9);
+    expect(row).toMatchObject({
+      rounds: 2,
+      returns: 3,
+      last_decision: 'returned by the merge queue',
+    });
+    expect(JSON.parse(row?.round_list ?? 'null')).toEqual([
+      { at: 'a', reason: 'ask', reviews: 0, run_id: 'r1' },
+      { at: 'b', reason: 'delivered', reviews: 2, run_id: 'r2' },
+    ]);
+  } finally {
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 9`);
+  }
+});
+
+test("a work item's parked reason and blockers come from its state", async () => {
+  await db.query(
+    `INSERT INTO mc.work_item_states (project_key, number, revision, parked_reason)
+     SELECT codebase, 9, 1, 'Held by the 11/09 ruling' FROM mc.factories WHERE name = 'mission-control'`,
+  );
+  await db.query(
+    `INSERT INTO mc.work_item_blockers (project_key, number, blocker)
+     SELECT codebase, 9, b FROM mc.factories, unnest(ARRAY[12, 4]) b WHERE name = 'mission-control'`,
+  );
+  try {
+    expect(await missionItem(9)).toMatchObject({
+      parked_reason: 'Held by the 11/09 ruling',
+      blockers: [4, 12],
+    });
+  } finally {
+    await db.query(`DELETE FROM mc.work_item_blockers WHERE number = 9`);
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 9`);
+  }
+});
+
+test("a stage 'blocked' item with no parked decision is blocked on its open Depends on", async () => {
+  const state = (stage: string) =>
+    db.query(
+      `INSERT INTO mc.work_item_states (project_key, number, revision, stage)
+       SELECT codebase, 9, 1, '${stage}' FROM mc.factories WHERE name = 'mission-control'`,
+    );
+  await db.query(
+    `INSERT INTO mc.issue_dependencies (factory, issue_number, depends_on) VALUES ('mission-control', 9, 4), ('mission-control', 9, 12)`,
+  );
+  await db.query(
+    `UPDATE mc.issues SET state = 'closed' WHERE factory = 'mission-control' AND number = 4`,
+  );
+  try {
+    await state('blocked');
+    expect((await missionItem(9))?.blockers).toEqual([12]);
+    const waits = (await view('mission-control')).pipeline
+      .flatMap((s) => s.items)
+      .find((i) => i.number === 9)?.waits;
+    expect(waits).toEqual({
+      kind: 'blockers',
+      items: [{ number: 12, to: '/f/mission-control/work/12' }],
+    });
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 9`);
+    await state('blocked');
+    await db.query(
+      `INSERT INTO mc.work_item_blockers (project_key, number, blocker)
+       SELECT codebase, 9, 7 FROM mc.factories WHERE name = 'mission-control'`,
+    );
+    expect((await missionItem(9))?.blockers).toEqual([7]);
+    await db.query(`DELETE FROM mc.work_item_blockers WHERE number = 9`);
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 9`);
+    await state('ready');
+    expect((await missionItem(9))?.blockers).toEqual([]);
+  } finally {
+    await db.query(`DELETE FROM mc.work_item_blockers WHERE number = 9`);
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 9`);
+    await db.query(`DELETE FROM mc.issue_dependencies WHERE issue_number = 9`);
+    await db.query(
+      `UPDATE mc.issues SET state = 'open' WHERE factory = 'mission-control' AND number = 4`,
+    );
+  }
+});
+
+test('a Refs-only item takes its pull request from the projection, with its head and app check head', async () => {
+  await db.query(
+    `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at)
+     VALUES ('mission-control', 9102, 't', 'open', NULL, 'abc123', 'u', now(), now())`,
+  );
+  await db.query(
+    `INSERT INTO mc.work_item_states (project_key, number, revision, pr_number)
+     SELECT codebase, 13, 1, 9102 FROM mc.factories WHERE name = 'mission-control'`,
+  );
+  await db.query('BEGIN');
+  try {
+    expect(await missionItem(13)).toMatchObject({
+      pr: 9102,
+      pr_open: null,
+      pr_head: 'abc123',
+      app_check_head: null,
+      app_check_run: null,
+    });
+    const runId = '5eed0700-0000-4000-8000-000000000001';
+    await db.query(
+      `INSERT INTO mc.laps (run_id, factory, workflow_name, status, started_at)
+       VALUES ($1, 'mission-control', 'factory-app-check', 'running', '2026-10-25T11:50:00Z')`,
+      [runId],
+    );
+    await db.query(
+      `INSERT INTO mc.lap_steps (run_id, step_id, status, started_at, output) VALUES
+       ($1, 'select', 'completed', '2026-10-25T11:50:00Z', '{"pr":9102}')`,
+      [runId],
+    );
+    expect(await missionItem(13)).toMatchObject({ app_check_run: runId });
+    await db.query(`UPDATE mc.laps SET status = 'completed' WHERE run_id = $1`, [runId]);
+    await db.query(
+      `INSERT INTO mc.lap_steps (run_id, step_id, status, started_at, output)
+       VALUES ($1, 'check', 'completed', '2026-10-25T11:51:00Z', '{"pr":9102,"head":"abc123","overall":"PASS"}')`,
+      [runId],
+    );
+    expect(await missionItem(13)).toMatchObject({
+      app_check_run: null,
+      app_check: 'PASS',
+      app_check_head: 'abc123',
+    });
+  } finally {
+    await db.query('ROLLBACK');
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 13`);
+    await db.query(
+      `DELETE FROM mc.pull_requests WHERE factory = 'mission-control' AND number = 9102`,
+    );
+  }
+});
+
+test('a Refs-only item whose projected pull request merged reads it, with its merge time', async () => {
+  await db.query(
+    `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at)
+     VALUES ('mission-control', 9104, 't', 'closed', '2026-03-04T05:06:07.089Z', 'merged1', 'u', now(), now())`,
+  );
+  await db.query(
+    `INSERT INTO mc.work_item_states (project_key, number, revision, pr_number)
+     SELECT codebase, 13, 1, 9104 FROM mc.factories WHERE name = 'mission-control'`,
+  );
+  try {
+    expect(await missionItem(13)).toMatchObject({
+      pr: 9104,
+      pr_open: null,
+      pr_head: 'merged1',
+      merged_at: '2026-03-04T05:06:07.089Z',
+    });
+  } finally {
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 13`);
+    await db.query(
+      `DELETE FROM mc.pull_requests WHERE factory = 'mission-control' AND number = 9104`,
+    );
+  }
+});
+
+test('merged_at is the merge fact’s time, else the merged pull request’s', async () => {
+  expect(await missionItem(10)).toMatchObject({ pr: 110, merged_at: '2026-10-20T09:30:00.000Z' });
+  expect(await missionItem(9)).toMatchObject({ merged_at: null });
+  await db.query(
+    `INSERT INTO mc.work_item_states (project_key, number, revision, merge_status, merge_at)
+     SELECT codebase, 10, 1, 'merged', '2026-10-20T08:00:00.000Z' FROM mc.factories WHERE name = 'mission-control'`,
+  );
+  try {
+    expect(await missionItem(10)).toMatchObject({ merged_at: '2026-10-20T08:00:00.000Z' });
+  } finally {
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 10`);
+  }
+});
+
+test('merged_at is null for a merge that a later build or triage has overtaken, next to an open pull request', async () => {
+  const state = (build: string | null, triage: string | null) =>
+    db.query(
+      `INSERT INTO mc.work_item_states (project_key, number, revision, merge_status, merge_at, build_at, triage_at)
+       SELECT codebase, 9, 1, 'merged', '2026-11-01T00:00:00.000Z', $1, $2 FROM mc.factories WHERE name = 'mission-control'
+       ON CONFLICT (project_key, number) DO UPDATE SET build_at = $1, triage_at = $2`,
+      [build, triage],
+    );
+  try {
+    await state('2026-11-05T00:00:00.000Z', '2026-11-04T00:00:00.000Z');
+    expect(await missionItem(9)).toMatchObject({ pr_open: true, merged_at: null });
+    await state(null, '2026-11-04T00:00:00.000Z');
+    expect(await missionItem(9)).toMatchObject({ merged_at: null });
+    await state('2026-11-01T00:00:00.000Z', null);
+    expect(await missionItem(9)).toMatchObject({
+      pr_open: true,
+      merged_at: '2026-11-01T00:00:00.000Z',
+    });
+  } finally {
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 9`);
+  }
+});
+
+test('one pull request answers pr and pr_head: open linked, else projected, else merged linked', async () => {
+  const fixtures = async (factory: string) => {
+    await db.query(
+      `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at)
+       VALUES ($1, 9102, 't', 'open', NULL, 'projected', 'u', now(), now()),
+         ($1, 9103, 't', 'open', NULL, 'linked', 'u', now(), now())`,
+      [factory],
+    );
+    await db.query(
+      `INSERT INTO mc.work_item_states (project_key, number, revision, pr_number)
+       SELECT codebase, 10, 1, 9102 FROM mc.factories WHERE name = $1`,
+      [factory],
+    );
+  };
+  await fixtures('mission-control');
+  try {
+    // Item 10: a merged closing pull request, and a later round's open one.
+    expect(await missionItem(10)).toMatchObject({
+      pr: 9102,
+      pr_head: 'projected',
+      pr_open: false,
+      merged_at: '2026-10-20T09:30:00.000Z',
+    });
+    await db.query(
+      `INSERT INTO mc.pull_request_issues (factory, pr_number, issue_number) VALUES ('mission-control', 9103, 10)`,
+    );
+    expect(await missionItem(10)).toMatchObject({
+      pr: 9103,
+      pr_head: 'linked',
+      pr_open: true,
+      merged_at: '2026-10-20T09:30:00.000Z',
+    });
+    // A merged Refs pull request never replaces the closing one's time, even a later one.
+    await db.query(
+      `INSERT INTO mc.pull_requests (factory, number, title, state, merged_at, head_sha, url, created_at, updated_at)
+       VALUES ('mission-control', 9105, 't', 'closed', '2026-12-01T00:00:00Z', 'refs', 'u', now(), now())`,
+    );
+    await db.query(
+      `INSERT INTO mc.pull_request_references (factory, pr_number, issue_number) VALUES ('mission-control', 9105, 10)`,
+    );
+    expect(await missionItem(10)).toMatchObject({ merged_at: '2026-10-20T09:30:00.000Z' });
+  } finally {
+    await db.query(`DELETE FROM mc.pull_request_references WHERE pr_number = 9105`);
+    await db.query(`DELETE FROM mc.pull_request_issues WHERE pr_number = 9103`);
+    await db.query(`DELETE FROM mc.work_item_states WHERE number = 10`);
+    await db.query(
+      `DELETE FROM mc.pull_requests WHERE factory = 'mission-control' AND number IN (9102, 9103, 9105)`,
+    );
+  }
+  expect(await missionItem(10)).toMatchObject({
+    pr: 110,
+    pr_open: false,
+    merged_at: '2026-10-20T09:30:00.000Z',
+  });
 });
 
 test('the board query stays fast when many runs have shipped', async () => {

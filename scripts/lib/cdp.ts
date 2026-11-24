@@ -8,13 +8,16 @@ import { PORT_FILE_NOT_WRITTEN_YET } from '../../harness/design-probe.js';
 export interface Page {
   /** Evaluates `expression` in the page, awaiting a promise, and returns its JSON value. */
   evaluate<T>(expression: string, timeoutMs?: number): Promise<T>;
-  /** Navigates and resolves once the page's load event fires. With `now`, the page's clock reads that instant (and moves on from it) before any of its scripts run. */
-  goto(url: string, now?: string): Promise<void>;
-  setViewport(width: number): Promise<void>;
+  /** Navigates and resolves once the page's load event fires. */
+  goto(url: string): Promise<void>;
+  /** Resolves once the resized page has been drawn (two animation frames), so a remount the width causes has committed. */
+  setViewport(width: number, height?: number): Promise<void>;
   /** One real mouse event at page coordinates `x`, `y`, left button; a move while pressed is a drag. */
   mouse(event: MouseInput): Promise<void>;
   /** One real touch event with a single finger at page coordinates `x`, `y`; a move while down is a drag. */
   touch(type: 'touchStart' | 'touchMove' | 'touchEnd', x: number, y: number): Promise<void>;
+  /** One real key press and release of `key` ('Enter' or 'Tab'), as the keyboard sends it. */
+  key(key: 'Enter' | 'Tab'): Promise<void>;
   /** A PNG of the whole page laid out `width` px wide. */
   screenshot(width: number): Promise<Buffer>;
   close(): Promise<void>;
@@ -240,9 +243,21 @@ export async function openPage(env: Record<string, string | undefined>): Promise
       flatten: true,
     });
     await cdp.send('Page.enable', {}, sessionId);
-    const setViewport = async (width: number) => {
-      const metrics = { width, height: 900, deviceScaleFactor: 1, mobile: false };
+    const setViewport = async (width: number, height = 900) => {
+      const metrics = { width, height, deviceScaleFactor: 1, mobile: false };
       await cdp.send('Emulation.setDeviceMetricsOverride', metrics, sessionId);
+      // A resize across the shell's 1024 px switch remounts the routed page on the next rendering
+      // update. Two frames let that commit before the caller reads (#728).
+      await cdp.send(
+        'Runtime.evaluate',
+        {
+          expression:
+            'new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))',
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        sessionId,
+      );
     };
     let pressed = false;
     return {
@@ -263,15 +278,7 @@ export async function openPage(env: Record<string, string | undefined>): Promise
         }
         return result.value;
       },
-      async goto(url: string, now?: string) {
-        if (now !== undefined) {
-          const source = `(() => { const Real = Date, offset = Real.parse(${JSON.stringify(now)}) - Real.now();
-            window.Date = class extends Real {
-              constructor(...args) { if (args.length === 0) super(Real.now() + offset); else super(...args); }
-              static now() { return Real.now() + offset; }
-            }; })()`;
-          await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source }, sessionId);
-        }
+      async goto(url: string) {
         const loaded = cdp.once('Page.loadEventFired', sessionId);
         loaded.catch(() => {});
         const { errorText } = await cdp.send<{ errorText?: string }>(
@@ -307,6 +314,17 @@ export async function openPage(env: Record<string, string | undefined>): Promise
           { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] },
           sessionId,
         );
+      },
+      async key(key: 'Enter' | 'Tab') {
+        const code = { Enter: 13, Tab: 9 }[key];
+        const text = key === 'Enter' ? String.fromCharCode(13) : undefined;
+        const event = { key, code: key, windowsVirtualKeyCode: code, text };
+        await cdp.send(
+          'Input.dispatchKeyEvent',
+          { type: text ? 'keyDown' : 'rawKeyDown', ...event },
+          sessionId,
+        );
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...event }, sessionId);
       },
       async screenshot(width: number) {
         await setViewport(width);

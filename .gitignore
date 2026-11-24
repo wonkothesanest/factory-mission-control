@@ -32,3 +32,5 @@ dist/
 # local port: local scratch, the detach marker and the check database file
 .tmp/
 .detached
+# local port: each install's own factory list (template: factories.local.example.json)
+/factories.local.json

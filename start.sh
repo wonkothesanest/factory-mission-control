@@ -23,6 +23,15 @@ cd "$MC_ROOT"
 
 PORT="${MC_PORT:-3092}"
 export MC_FACTORIES_FILE="${MC_FACTORIES_FILE:-$MC_ROOT/factories.local.json}"
+# The factories this install shows are the operator's own list, not part of the dashboard's code.
+# factories.local.example.json is the template: one entry per factory, its forge repository
+# (owner/name), its Archon codebase name, the Archon console, and optionally code_web, the web
+# address of the repository where published branches live.
+if [ ! -f "$MC_FACTORIES_FILE" ]; then
+  echo "start.sh: no factory list at $MC_FACTORIES_FILE." >&2
+  echo "  Copy factories.local.example.json to factories.local.json and list your factories in it." >&2
+  exit 1
+fi
 # The local forge's SQLite file (opened read-only) and the app checkouts (factory/pack.json pins).
 export MC_FORGE_DB="${MC_FORGE_DB:-$FACTORY_ROOT/forge/state/forge.db}"
 export MC_APPS_DIR="${MC_APPS_DIR:-$FACTORY_ROOT/apps}"

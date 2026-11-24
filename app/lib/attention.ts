@@ -1,3 +1,7 @@
+import type { ActionRequest } from './actions';
+
+/** The writes on a work item, as `ActionRequest` owns them. */
+export type ItemWrite = Extract<ActionRequest, { number: number }>['action'];
 /**
  * The Attention page's attention items (PRD 4.9): `db/queries/attention-items.sql`'s rows as the
  * runs waiting on a person, longest-waiting first. Pure, no React; the browser's clock gives the
@@ -41,16 +45,25 @@ export interface DecideRow extends AttentionRow {
   /** Archon's `recommendation.why`; null for a wait recorded before Archon stored it. */
   recommendation_why: string | null;
   item_number: number | null;
+  /** The title of the issue or pull request `item_number` names; null when it is not mirrored. */
+  item_title: string | null;
+  /** The steps the run was running when it paused, newest first (home-map's lap rule); null when none. */
+  steps: string[] | null;
 }
 
 export type DecideItem = AttentionItem &
   Pick<
     DecideRow,
-    'occurrence_id' | 'recommended' | 'confidence' | 'recommendation_why' | 'item_number'
+    | 'occurrence_id'
+    | 'recommended'
+    | 'confidence'
+    | 'recommendation_why'
+    | 'item_number'
+    | 'item_title'
   >;
 
 export const UNSTICK_KINDS = ['blocked', 'parked', 'capacity', 'claim'] as const;
-export const UNSTICK_ACTIONS = ['retriage', 'resume', 'release_claim'] as const;
+export const UNSTICK_ACTIONS = ['retriage', 'resume'] as const;
 
 /** One row of unstick.sql: work that stopped moving, what it waits on, since when, and the one action that moves it. */
 export interface UnstickRow {
@@ -61,10 +74,20 @@ export interface UnstickRow {
   waits_on: string;
   since: Date | null;
   action: (typeof UNSTICK_ACTIONS)[number];
-  /** The factory's `owner/repo`, for the command that moves the item. */
-  repository: string;
+  /** The title of the item `number` names; null for an item-less row or one not mirrored. */
+  title: string | null;
+  /** The titles of what it waits on, in the order of `waits_on`; an empty string where one is not mirrored. */
+  blocker_titles: string[] | null;
+  /** Why the build queue parked it, from the work item's state; null for any other kind. */
+  reason: string | null;
   /** The factory's Archon console, for a run link. */
   console: string;
+  /** Whether the mirror holds the item `number` names open; the item writes are offered only then. */
+  open: boolean;
+  /** The item's latest write sent from the dashboard that the mirror has not caught up with; null when none. */
+  sent_action: ItemWrite | null;
+  /** When `sent_action` was sent. */
+  sent_at: Date | null;
 }
 
 export interface AttentionItem extends Omit<AttentionRow, 'options' | 'labels'> {

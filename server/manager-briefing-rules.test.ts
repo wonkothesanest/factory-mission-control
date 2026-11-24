@@ -2,12 +2,18 @@ import { describe, expect, test } from 'bun:test';
 import { ATTENTION_SOURCES, attentionCount } from '../app/lib/attention-page';
 import { parseMessage, topLevelBlocks } from '../app/lib/manager-markdown';
 import { LIVE_QUERIES_DIR, loadLiveQueries } from './live';
-import { type AttentionTally, attentionLine, capBriefingProse } from './manager';
+import {
+  type AttentionTally,
+  attentionLine,
+  BRIEFING_BLOCK_CHARS,
+  BRIEFING_PROSE_BLOCKS,
+  capBriefingProse,
+} from './manager';
 import { withheldFromBriefing } from './manager-tools';
 
 const keys = Object.keys(ATTENTION_SOURCES) as (keyof typeof ATTENTION_SOURCES)[];
 const tallyOf = (counts: number[]): AttentionTally => {
-  const t = { failureRuns: 0, failures: 0 } as AttentionTally;
+  const t = {} as AttentionTally;
   keys.forEach((key, i) => {
     t[key] = counts[i] ?? 0;
   });
@@ -16,7 +22,7 @@ const tallyOf = (counts: number[]): AttentionTally => {
 
 describe('the count line', () => {
   test('the line states the total attentionCount gives', () => {
-    for (const counts of [[1], [0, 2], [3, 1, 4, 1, 5], [1, 1, 1, 1, 1, 1, 1, 1]]) {
+    for (const counts of [[1], [0, 2], [3, 1, 4], [1, 1, 1]]) {
       const tally = tallyOf(counts);
       const total = attentionCount(
         keys.map((key) => ({ state: 'ready' as const, rows: new Array(tally[key]).fill({}) })),
@@ -33,6 +39,7 @@ describe('the briefing queries', () => {
     const named = [
       'attention-items',
       'home-map',
+      'failure-groups',
       ...Object.values(ATTENTION_SOURCES).map((s) => s.query),
     ];
     for (const name of named) expect(queries.has(name)).toBe(true);
@@ -59,6 +66,14 @@ describe('the briefing cap and the panel agree on what a block is', () => {
     ['mixed', 'intro\n\n1. one\n2. two\n\n- x\n\nend'],
   ])('%s', (_name, text) => {
     expect(topLevelBlocks(text)).toHaveLength(units(text));
-    expect(units(capBriefingProse(text))).toBe(Math.min(units(text), 3));
+    expect(units(capBriefingProse(text))).toBe(Math.min(units(text), BRIEFING_PROSE_BLOCKS));
   });
+});
+
+test('a model block over the line limit is shortened at a word, not dropped', () => {
+  const long = `${'word '.repeat(60)}end`;
+  const [first, second] = capBriefingProse(`${long}\n\nShort.`).split('\n\n');
+  expect(first.length).toBeLessThanOrEqual(BRIEFING_BLOCK_CHARS);
+  expect(first).toMatch(/word…$/);
+  expect(second).toBe('Short.');
 });

@@ -1,16 +1,20 @@
 /**
  * The Attention page's cards (PRD 4.10, v3 README "Attention"): the rows of `decide`,
- * `owner-queue`, `unstick` and `failure-groups` as one uniform card, with a manager's note written
+ * `owner-queue` and `unstick` as one uniform card, with a manager's note written
  * from the data alone. Pure, no React. The page draws the cards By kind or By queue; the nav badge
  * counts the same rows with `attentionCount`.
  *
- * Clean up ("safe to clear") is not a group here: no live query names such an item yet.
+ * Every card says in plain sentences what it waits on and what each option does, then ends in option
+ * tiles, the recommended one first, and "Something else" last. Failures are not Attention items: they
+ * live on Runs (failure-view.ts). Clean up ("safe to clear") is not a group here: no live query names
+ * such an item yet.
  */
 import type { Source } from '../live/Feed';
-import { cardForStep, FACTORY_MAP } from '../map/factory-map';
-import type { ActionRequest, AnswerRequest } from './actions';
+import { FACTORY_MAP } from '../map/factory-map';
+import { type ActionRequest, type AnswerRequest, type CommentRequest, needsLogin } from './actions';
 import {
   type DecideRow,
+  type ItemWrite,
   attentionItems,
   attentionOrigin,
   attentionQuestion,
@@ -19,22 +23,24 @@ import {
   UNSTICK_KINDS,
   type UnstickRow,
 } from './attention';
-import { type FailureGroupRow, failuresSince, type StopClass } from './failures';
-import { shortRunId } from './format';
+import { waitCard } from './board';
+import { localMinute, shortRunId } from './format';
 import { askAbout, type ManagerAsk } from './manager';
-import { stepPath } from './lap-graph';
 import { since } from './laps';
-import { consoleUrl, INTAKE_WORKFLOW, lapHref, workflowLabel } from './one-lap';
+import { consoleUrl, workflowLabel } from './one-lap';
 import { type OwnerQueueRow, ownerQueue, waited } from './owner-queue';
-import { LAP_OUTCOME_STATE, STOP_CLASS_STATE, type State, UNSTICK_STATE } from './states';
+import { LAP_OUTCOME_STATE, type State, UNSTICK_STATE } from './states';
 import { workItemHref } from './work-item';
 
-export type AttentionKind = 'decide' | 'unstick' | 'fix';
+export type AttentionKind = 'decide' | 'unstick';
 
-export const KINDS: readonly { kind: AttentionKind; name: string; why: string }[] = [
+export const KINDS: readonly {
+  kind: AttentionKind;
+  name: string;
+  why: string;
+}[] = [
   { kind: 'decide', name: 'Decide', why: 'a question only you can answer' },
   { kind: 'unstick', name: 'Unstick', why: 'work that stopped moving' },
-  { kind: 'fix', name: 'Fix', why: 'failures, grouped by cause' },
 ];
 
 export type AttentionQueue = 'intake' | 'build' | 'merge' | 'app-check' | 'discoveries' | 'other';
@@ -60,15 +66,20 @@ export const QUEUE_OF_CARD: Readonly<Record<string, AttentionQueue>> = {
 };
 
 /**
- * The queue the factory map gives a step: the card covering it, else (no step, or one no card
- * covers) the first card covering the workflow at all. A workflow no card covers is Other.
+ * The queue of the map card a wait belongs to (`waitCard`: a queue workflow's own, else its deepest
+ * running step's, else its node's), else the first card covering the workflow at all. A workflow no
+ * card covers is Other.
  */
-export function queueOf(workflow: string | null, step: string | null = null): AttentionQueue {
+export function queueOf(
+  workflow: string | null,
+  node: string | null = null,
+  steps: readonly string[] | null = null,
+): AttentionQueue {
   if (workflow === null) return 'other';
   const card =
-    (step === null ? undefined : cardForStep(FACTORY_MAP, workflow, stepPath(step))) ??
-    FACTORY_MAP.cards.find((c) => c.covers.some((cover) => cover.workflow === workflow));
-  return QUEUE_OF_CARD[card?.id ?? ''] ?? 'other';
+    waitCard(workflow, steps, node) ??
+    FACTORY_MAP.cards.find((c) => c.covers.some((cover) => cover.workflow === workflow))?.id;
+  return QUEUE_OF_CARD[card ?? ''] ?? 'other';
 }
 
 export type MetaPart = { mono: string } | { pill: string; state: State } | { text: string };
@@ -82,32 +93,27 @@ export interface Tile {
   recommended: boolean;
   /** Where the answer is given; null when the item has no address. */
   href: string | null;
-  /** Answers in place with this option, when the server holds an operator for the factory. */
-  answer?: { request: AnswerRequest; item: number | null };
-  /** Opens the text box: the answer is the owner's own words, sent as `request` with `text` filled. */
-  somethingElse?: { request: AnswerRequest; item: number | null };
+  /** Sends this write in place, when the server holds an operator for the factory. */
+  act?: { request: ActionRequest; item: number | null };
+  /** Opens the text box: the owner's own words, sent as `request` with `text` filled. */
+  somethingElse?: {
+    request: AnswerRequest | CommentRequest;
+    item: number | null;
+  };
+  /** Opens the Manager's box on this card, for a card no write takes the owner's words for. */
+  manager?: ManagerAsk;
   hooks: Hooks;
 }
 
-export type Action =
-  | {
-      type: 'link';
-      variant: 'primary' | 'secondary';
-      label: string;
-      href: string;
-      external: boolean;
-      hooks: Hooks;
-    }
-  | {
-      /** Acts in place when the server holds an operator for the factory, else it is `fallback`. */
-      type: 'act';
-      variant: 'primary' | 'secondary';
-      label: string;
-      request: ActionRequest;
-      fallback: { href: string; external: boolean };
-      hooks: Hooks;
-    }
-  | { type: 'copy'; variant: 'primary' | 'secondary'; label: string; command: string };
+/** A link beside the tiles; the writes are the tiles. */
+export interface Action {
+  type: 'link';
+  variant: 'primary' | 'secondary';
+  label: string;
+  href: string;
+  external: boolean;
+  hooks: Hooks;
+}
 
 export interface AttentionCard {
   key: string;
@@ -123,17 +129,17 @@ export interface AttentionCard {
   actions: Action[];
   /** What "Ask manager" hands the panel: the run and work item this card is about. */
   ask: ManagerAsk;
-  /** Failures per day, oldest first (Fix). */
-  daily?: number[];
   hooks: Hooks;
 }
 
-/** `gh` and `archon` as the queues' own procedure runs them (archon-cli skill, operate/queues.md). */
-export const retriageCommand = (repository: string, number: number): string =>
-  `gh issue edit ${number} --repo ${repository} --add-label archon-triage && archon workflow run ${INTAKE_WORKFLOW} --input repo_host=github.com --input repo_path=${repository} --input number=${number} --input action=added --input label=archon-triage --input label_actor="$(gh api user --jq .login)" --detach`;
+const SOMETHING_ELSE = 'Something else';
 
-export const releaseCommand = (repository: string, workflow: string): string =>
-  `archon workflow run ${workflow} --input repo_host=github.com --input repo_path=${repository} --detach`;
+/** Recommended tile first, "Something else" last, the rest in the order Archon declared them. */
+const recommendedFirst = (tiles: Tile[]): Tile[] => [
+  ...tiles.filter((t) => t.recommended),
+  ...tiles.filter((t) => !t.recommended && t.label !== SOMETHING_ELSE),
+  ...tiles.filter((t) => !t.recommended && t.label === SOMETHING_ELSE),
+];
 
 /** Archon's open questions: each option tile answers in place with an operator, and opens the console without one. */
 export function decideCards(rows: readonly DecideRow[], factory: string): AttentionCard[] {
@@ -142,6 +148,7 @@ export function decideCards(rows: readonly DecideRow[], factory: string): Attent
       ? item.recommended
       : null;
     const link = consoleUrl(item.console, item.run_id);
+    const ask = askAbout(item.run_id, item.item_number);
     const question = { form: item.form, options: item.options };
     const resolves = (option: string | null) =>
       !('error' in resolveAnswer(question, { option, text: null }));
@@ -158,7 +165,12 @@ export function decideCards(rows: readonly DecideRow[], factory: string): Attent
       // "Something else" takes the owner's text; any other option is the answer itself.
       const place = !resolves(o.id)
         ? { somethingElse: { request: asked, item: item.item_number } }
-        : { answer: { request: { ...asked, option: o.id }, item: item.item_number } };
+        : {
+            act: {
+              request: { ...asked, option: o.id },
+              item: item.item_number,
+            },
+          };
       return {
         id: o.id,
         label,
@@ -172,18 +184,28 @@ export function decideCards(rows: readonly DecideRow[], factory: string): Attent
     if (item.options.every((o) => resolves(o.id))) {
       tiles.push({
         id: 'something-else',
-        label: 'Something else',
-        consequence: 'Write your own answer',
+        label: SOMETHING_ELSE,
+        consequence: resolves(null)
+          ? 'Write your own answer'
+          : 'Tell the manager what you want; it proposes the action as a button',
         recommended: false,
         href: link,
         // Only a free-text question takes text without a declared option to carry it.
-        ...(resolves(null) ? { somethingElse: { request: asked, item: item.item_number } } : {}),
+        ...(resolves(null)
+          ? { somethingElse: { request: asked, item: item.item_number } }
+          : { manager: ask }),
         hooks: { 'data-choice': 'something-else', 'data-something-else': '' },
       });
     }
     const chosen = item.options.find((o) => o.id === recommended);
     const heading = attentionQuestion(item.message);
-    const queue = queueOf(item.workflow_name, item.node_id);
+    const queue = queueOf(item.workflow_name, item.node_id, item.steps);
+    const subject =
+      item.item_number === null
+        ? `Run ${shortRunId(item.run_id)}`
+        : item.item_title === null
+          ? `#${item.item_number}`
+          : `#${item.item_number} “${item.item_title}”`;
     return {
       key: `decide:${item.run_id}`,
       kind: ATTENTION_SOURCES.decide.kind,
@@ -196,19 +218,20 @@ export function decideCards(rows: readonly DecideRow[], factory: string): Attent
         { pill: attentionOrigin(item), state: 'needs-you' },
         { mono: item.node_id },
       ],
-      note:
-        chosen === undefined
-          ? {
-              lead: 'No recommendation.',
-              rest: `The run waits at ${item.node_id} until you answer.`,
-            }
-          : {
-              lead: `Recommends ${chosen.label ?? chosen.id}.`,
-              rest: item.recommendation_why ?? recommendationReason(item.message),
-            },
-      tiles,
+      note: {
+        lead: `${subject} waits at ${item.node_id} for your answer since ${localMinute(item.waiting_since)}. ${
+          chosen === undefined
+            ? 'There is no recommendation.'
+            : `Recommends ${chosen.label ?? chosen.id}.`
+        }`,
+        rest:
+          chosen === undefined
+            ? ''
+            : (item.recommendation_why ?? recommendationReason(item.message)),
+      },
+      tiles: recommendedFirst(tiles),
       ...(item.confidence === null ? {} : { confidence: `${item.confidence} confidence` }),
-      ask: askAbout(item.run_id, item.item_number),
+      ask,
       actions: [
         item.item_number === null
           ? {
@@ -241,12 +264,13 @@ export function decideCards(rows: readonly DecideRow[], factory: string): Attent
 
 const timeOf = (at: Date | null) => (at === null ? Number.POSITIVE_INFINITY : at.getTime());
 
-const utcMinute = (at: Date) => `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+const momentOf = (at: Date | null, none: string) => (at === null ? none : localMinute(at));
 
-/** The old loop's owner items, answered on GitHub; the loop applies a question's default when nobody answers. */
+/** The old loop's owner items, answered on GitHub; the loop applies a question's default when nobody answers. No write takes an answer on GitHub, so Something else hands the owner's words to the Manager. */
 export function ownerCards(rows: readonly OwnerQueueRow[]): AttentionCard[] {
   return ownerQueue(rows).map((item) => {
     const question = item.kind === 'question';
+    const ask = askAbout(null, item.issue_number);
     const actions: Action[] =
       item.url === null
         ? []
@@ -260,6 +284,28 @@ export function ownerCards(rows: readonly OwnerQueueRow[]): AttentionCard[] {
               hooks: { 'data-thread': '' },
             },
           ];
+    const options: Tile[] = question
+      ? item.options.map((o) => ({
+          id: o.key,
+          label: `${o.key}. ${o.text}`,
+          recommended: o.key === item.default_option,
+          href: item.url,
+          hooks: {
+            'data-option': o.key,
+            'data-option-text': o.text,
+            'data-default': o.key === item.default_option ? '' : undefined,
+          },
+        }))
+      : [
+          {
+            id: 'reply',
+            label: 'Reply on GitHub',
+            consequence: 'Opens the issue, where you answer in a comment',
+            recommended: true,
+            href: item.url,
+            hooks: { 'data-choice': 'reply' },
+          },
+        ];
     return {
       key: `owner:${item.id}`,
       kind: ATTENTION_SOURCES.owner.kind,
@@ -278,28 +324,31 @@ export function ownerCards(rows: readonly OwnerQueueRow[]): AttentionCard[] {
           ],
       note: question
         ? {
-            lead:
+            lead: `#${item.issue_number} asks question ${item.question_number} since ${momentOf(item.waiting_since, 'a time not recorded')}. ${
               item.default_option === null
-                ? 'No default.'
-                : `Default ${item.default_option} applies ${
-                    item.default_at === null ? 'at a time not recorded' : utcMinute(item.default_at)
-                  }.`,
+                ? 'There is no default.'
+                : `Default ${item.default_option} applies ${momentOf(item.default_at, 'at a time not recorded')}.`
+            }`,
             rest: item.recommendation ?? '',
           }
-        : { lead: 'Labelled needs-owner.', rest: 'It waits for your reply on the issue.' },
-      tiles: item.options.map((o) => ({
-        id: o.key,
-        label: `${o.key}. ${o.text}`,
-        recommended: o.key === item.default_option,
-        href: item.url,
-        hooks: {
-          'data-option': o.key,
-          'data-option-text': o.text,
-          'data-default': o.key === item.default_option ? '' : undefined,
+        : {
+            lead: `#${item.issue_number} “${item.title}” has been labelled needs-owner since ${momentOf(item.waiting_since, 'a time not recorded')}.`,
+            rest: 'It waits for your reply on the issue.',
+          },
+      tiles: recommendedFirst([
+        ...options,
+        {
+          id: 'something-else',
+          label: SOMETHING_ELSE,
+          consequence: 'Tell the manager what you want; it proposes the action as a button',
+          recommended: false,
+          href: item.url,
+          manager: ask,
+          hooks: { 'data-choice': 'something-else', 'data-something-else': '' },
         },
-      })),
+      ]),
       actions,
-      ask: askAbout(null, item.issue_number),
+      ask,
       hooks: {
         'data-owner-item': item.id,
         'data-kind': item.kind,
@@ -318,14 +367,65 @@ export function ownerCards(rows: readonly OwnerQueueRow[]): AttentionCard[] {
   });
 }
 
-const closed = (waitsOn: string) => (waitsOn.includes(',') ? 'all have closed' : 'it has closed');
+/** What an item is called in a sentence: `#455 “title”`, or `#455` when its title is not mirrored. */
+const named = (number: number | string, title: string | null | undefined) =>
+  title ? `#${number} “${title}”` : `#${number}`;
+
+/** The blockers of a row, `#455 “title”`, in the order of its `waits_on`. */
+function blockers(row: UnstickRow): string[] {
+  return row.waits_on
+    .split(', ')
+    .map((ref, i) => named(ref.replace('#', ''), row.blocker_titles?.[i]));
+}
+
+/** "#B “t” closed 2026-10-24 09:08." or, for several, "#B “t”, #C “u” all closed by 2026-10-24 09:08." */
+function closedSentence(row: UnstickRow): string {
+  const list = blockers(row);
+  const when = row.since === null ? '' : ` ${localMinute(row.since)}`;
+  return list.length === 1
+    ? `${list[0]} closed${when}.`
+    : `${list.join(', ')} all closed${when === '' ? '' : ` by${when}`}.`;
+}
 
 /** A card's key, which the live phase reads back to find the card of a row. */
 export const unstickKey = (row: Pick<UnstickRow, 'kind' | 'number' | 'run_id'>): string =>
   `unstick:${row.kind}:${row.number ?? ''}:${row.run_id ?? ''}`;
 
-/** Work that stopped moving. Re-triage and releasing a claim are copied commands; Resume opens the run in the console. */
-export function unstickCards(rows: readonly UnstickRow[], factory: string): AttentionCard[] {
+const SENT_VERBS: Record<ItemWrite, string> = {
+  retriage: 'Re-triage',
+  close: 'Close',
+  comment: 'Comment',
+};
+
+/** What the card says first while the item has a write the mirror has not caught up with. */
+function sentSentence(row: UnstickRow): string | null {
+  if (row.sent_action === null || row.sent_at === null) return null;
+  const at = localMinute(row.sent_at);
+  const verb = SENT_VERBS[row.sent_action];
+  return row.sent_action === 'close'
+    ? `${verb} sent ${at}; waiting for GitHub to show #${row.number} closed.`
+    : `${verb} sent ${at}; waiting for intake.`;
+}
+
+const RETRIAGE_DOES = 'Adds archon-triage and starts an intake run; triage decides its next stage';
+const CLOSE_DOES =
+  'Closes the issue as not planned, with a comment that you closed it from Mission Control';
+const COMMENT_DOES = 'Posts your text on the issue as your comment, then re-triages it';
+
+/**
+ * Work that stopped moving: re-triage, close or comment on the item, or resume a run waiting for a
+ * slot. The tile `row.action` names is the recommended one. `loginMissing` is an operator with no
+ * `login`: the server refuses re-triage and comment for it, so only Close is offered. Without an
+ * operator entry (`operator` false) the page cannot write at all, so a tile only opens the item and
+ * says so, and no tile is recommended. While the item has a sent write the mirror has not caught up
+ * with, the card says so first and recommends no item write; Resume keeps its recommendation.
+ */
+export function unstickCards(
+  rows: readonly UnstickRow[],
+  factory: string,
+  loginMissing: boolean,
+  operator = true,
+): AttentionCard[] {
   return [...rows]
     .sort(
       (a, b) =>
@@ -338,18 +438,130 @@ export function unstickCards(rows: readonly UnstickRow[], factory: string): Atte
       const queue = row.workflow_name === null ? 'intake' : queueOf(row.workflow_name);
       const n = row.number === null ? null : `#${row.number}`;
       const run = row.run_id === null ? null : shortRunId(row.run_id);
+      const ask = askAbout(row.run_id, row.number);
+      const itemHref = row.number === null ? null : workItemHref(factory, row.number);
       const open: Action[] =
-        row.number === null
+        row.number === null || itemHref === null || !operator
           ? []
           : [
               {
                 type: 'link',
                 variant: 'secondary',
                 label: `Open #${row.number}`,
-                href: workItemHref(factory, row.number),
+                href: itemHref,
                 external: false,
                 hooks: {},
               },
+            ];
+      const act = (
+        id: 'retriage' | 'close' | 'resume',
+        label: string,
+        consequence: string,
+        request: ActionRequest,
+        href: string | null,
+      ): Tile => ({
+        id,
+        label,
+        consequence,
+        recommended: id === row.action && (id === 'resume' || row.sent_action === null),
+        href,
+        act: { request, item: row.number },
+        hooks: {
+          'data-choice': id,
+          'data-act': id,
+          'data-act-item': row.number === null ? undefined : String(row.number),
+        },
+      });
+      const sent = sentSentence(row);
+      const note = (lead: string, rest: string) =>
+        sent === null
+          ? { lead, rest }
+          : { lead: sent, rest: rest === '' ? lead : `${lead} ${rest}` };
+      const writable = row.number !== null && row.open && operator;
+      const openOnly = (): Tile[] =>
+        row.number === null || itemHref === null
+          ? []
+          : [
+              {
+                id: 'open',
+                label: `Open #${row.number}`,
+                consequence: `Opens #${row.number} in Mission Control; nothing is changed from here`,
+                recommended: false,
+                href: itemHref,
+                hooks: { 'data-choice': 'open' },
+              },
+            ];
+      const offered = (action: ActionRequest['action']) => !(loginMissing && needsLogin(action));
+      const commentable = writable && offered('comment');
+      const withheld =
+        row.number !== null && !row.open
+          ? ` ${n} is not an open issue, so re-triage, close and comment are not offered; open it to see where it stands.`
+          : !operator
+            ? ` Mission Control is not writing for this factory right now, so it does not offer to re-triage, close or comment on ${n}; open it in Mission Control, then use its Issue link to act on GitHub.`
+            : loginMissing
+              ? ' Re-triage and comments need the operator’s `login`, which this factory’s operator entry lacks; Close is offered.'
+              : '';
+      const closedNote = row.number === null ? '' : withheld;
+      const somethingElse = (): Tile[] => (!operator ? openOnly() : [somethingElseTile()]);
+      const somethingElseTile = (): Tile =>
+        !commentable || row.number === null
+          ? {
+              id: 'something-else',
+              label: SOMETHING_ELSE,
+              consequence:
+                writable && loginMissing
+                  ? 'Tell the manager what you want; for re-triage or a comment it can only link the issue, since those need the operator’s `login`'
+                  : 'Tell the manager what you want; it proposes the action as a button',
+              recommended: false,
+              href: itemHref,
+              manager: ask,
+              hooks: {
+                'data-choice': 'something-else',
+                'data-something-else': '',
+              },
+            }
+          : {
+              id: 'something-else',
+              label: SOMETHING_ELSE,
+              consequence: COMMENT_DOES,
+              recommended: false,
+              href: itemHref,
+              somethingElse: {
+                request: {
+                  factory,
+                  action: 'comment',
+                  number: row.number,
+                  text: '',
+                },
+                item: row.number,
+              },
+              hooks: {
+                'data-choice': 'something-else',
+                'data-something-else': '',
+              },
+            };
+      const itemWrites = (): Tile[] =>
+        !writable || row.number === null
+          ? []
+          : [
+              ...(offered('retriage')
+                ? [
+                    act(
+                      'retriage',
+                      `Re-triage #${row.number}`,
+                      RETRIAGE_DOES,
+                      { factory, action: 'retriage', number: row.number },
+                      itemHref,
+                    ),
+                  ]
+                : []),
+              act(
+                'close',
+                `Close #${row.number}`,
+                CLOSE_DOES,
+                { factory, action: 'close', number: row.number },
+                itemHref,
+              ),
             ];
       const base = {
         key,
@@ -357,62 +569,69 @@ export function unstickCards(rows: readonly UnstickRow[], factory: string): Atte
         queue,
         dot: 'needs-you',
         age: { since: row.since },
-        tiles: [] as Tile[],
-        ask: askAbout(row.run_id, row.number),
+        ask,
+        actions: open,
         hooks: {
           'data-attention-item': key,
           'data-attention-kind': ATTENTION_SOURCES.unstick.kind,
           'data-attention-queue': queue,
           'data-unstick-kind': row.kind,
           'data-number': row.number === null ? undefined : String(row.number),
+          'data-waits-on': row.waits_on,
         },
       } as const;
       const workflow: MetaPart[] = row.workflow_name === null ? [] : [{ mono: row.workflow_name }];
       const waits: MetaPart = { text: `waits on ${row.waits_on}` };
-      switch (row.action) {
-        case 'retriage': {
-          const copy: Action[] =
-            row.number === null
-              ? []
-              : [
-                  {
-                    type: 'copy',
-                    variant: 'primary',
-                    label: 'Copy the re-triage command',
-                    command: retriageCommand(row.repository, row.number),
-                  },
-                ];
+      const label = row.workflow_name === null ? '' : workflowLabel(row.workflow_name);
+      switch (row.kind) {
+        case 'blocked':
+        case 'parked': {
+          const closed = row.waits_on.includes(',') ? 'all have closed' : 'it has closed';
           return {
             ...base,
-            title: `${n} is ${row.kind} on ${row.waits_on}, and ${closed(row.waits_on)}`,
+            title: `${n} is ${row.kind} on ${row.waits_on}, and ${closed}`,
             meta: [{ pill: row.kind, state: UNSTICK_STATE[row.kind] }, waits],
-            note:
-              row.kind === 'blocked'
-                ? {
-                    lead: 'The blocker is gone.',
-                    rest: 'A named build round refuses blocked items, so it waits for the next revisit unless you re-triage it.',
-                  }
-                : {
-                    lead: 'What it was parked on has closed.',
-                    rest: 'A parked item waits until it is re-triaged.',
-                  },
-            actions: [...copy, ...open],
+            note: note(
+              closedSentence(row),
+              (row.kind === 'blocked'
+                ? `${n}'s issue says it depends on ${row.waits_on}, so triage put it in blocked. A named build round refuses blocked items.`
+                : `${n} was parked on ${row.waits_on.includes(',') ? 'them' : 'it'}${row.reason === null ? '' : `: “${row.reason}”`}. Nothing re-triages a parked item on its own.`) +
+                closedNote,
+            ),
+            tiles: [...itemWrites(), ...somethingElse()],
           };
         }
-        case 'resume': {
-          const resume: Action[] =
+        case 'capacity': {
+          const since = row.since === null ? '' : ` since ${localMinute(row.since)}`;
+          const resume: Tile[] =
             row.run_id === null
               ? []
-              : [
-                  {
-                    type: 'act',
-                    variant: 'primary',
-                    label: `Resume ${run}`,
-                    request: { factory, action: 'resume', run_id: row.run_id, from_step: null },
-                    fallback: { href: consoleUrl(row.console, row.run_id), external: true },
-                    hooks: { 'data-act': 'resume', 'data-act-run': row.run_id },
-                  },
-                ];
+              : !operator
+                ? [
+                    {
+                      id: 'resume',
+                      label: `Open run ${run}`,
+                      consequence:
+                        'Opens the run in the Archon console; nothing is changed from here',
+                      recommended: false,
+                      href: consoleUrl(row.console, row.run_id),
+                      hooks: { 'data-choice': 'resume' },
+                    },
+                  ]
+                : [
+                    act(
+                      'resume',
+                      `Resume run ${run}`,
+                      'Asks Archon to continue the run now',
+                      {
+                        factory,
+                        action: 'resume',
+                        run_id: row.run_id,
+                        from_step: null,
+                      },
+                      consoleUrl(row.console, row.run_id),
+                    ),
+                  ];
           return {
             ...base,
             title:
@@ -421,147 +640,51 @@ export function unstickCards(rows: readonly UnstickRow[], factory: string): Atte
                 : `${n} was answered, but its run is waiting for a slot`,
             meta: [
               ...workflow,
-              { pill: 'answered · waiting for capacity', state: UNSTICK_STATE.capacity },
+              {
+                pill: 'answered · waiting for capacity',
+                state: UNSTICK_STATE.capacity,
+              },
               waits,
             ],
-            note: {
-              lead: 'Answered, waiting for a free slot.',
-              rest: 'Runs in this state do not always continue on their own; resuming once a slot frees moves it.',
-            },
-            actions: [...resume, ...open],
+            note: note(
+              `Run ${run} of ${label} was answered and has waited for a free slot${since}.`,
+              `Runs in this state do not always continue on their own.${closedNote}`,
+            ),
+            tiles: [...resume, ...itemWrites(), ...somethingElse()],
           };
         }
-        case 'release_claim': {
-          const release: Action[] =
-            row.workflow_name === null
-              ? []
-              : [
-                  {
-                    type: 'copy',
-                    variant: 'primary',
-                    label: `Copy the command for a new ${workflowLabel(row.workflow_name)} run`,
-                    command: releaseCommand(row.repository, row.workflow_name),
-                  },
-                ];
+        case 'claim':
           return {
             ...base,
             title: `${n} is claimed by run ${run}, which has finished`,
             meta: [...workflow, { pill: 'claimed', state: UNSTICK_STATE.claim }, waits],
-            note: {
-              lead: 'The run holding the claim has finished.',
-              rest: 'A new run of its queue that names no item releases it.',
-            },
-            actions: [...release, ...open],
+            note: note(
+              `Run ${run} of ${label} finished${row.since === null ? '' : ` at ${localMinute(row.since)}`} and still claims ${n}.`,
+              `Any intake run releases the claim${commentable ? `; re-triaging ${n} starts one and keeps its build progress` : ''}.${closedNote}`,
+            ),
+            tiles: [...itemWrites(), ...somethingElse()],
           };
-        }
         default:
-          return row.action satisfies never;
+          return row.kind satisfies never;
       }
     });
 }
 
-const CLASS_NOTE: Readonly<Record<StopClass | 'mixed', string>> = {
-  transient: 'It is transient: a retry usually passes.',
-  environment: 'It is the environment, not the code.',
-  config: 'It is configuration: a binding, a schedule or a credential.',
-  code: 'It is a code failure.',
-  input: 'It is the input: the run was given something it could not use.',
-  mixed: 'Its runs differ in class.',
-};
-
-const DAY_MS = 86_400_000;
-const utcDay = (at: Date) => Math.floor(at.getTime() / DAY_MS);
-const lastTime = (g: FailureGroupRow) => g.last_at?.getTime() ?? 0;
-
-/** One card per failure signature, with the days it spans (UTC calendar days, inclusive). */
-export function fixCards(rows: readonly FailureGroupRow[], factory: string): AttentionCard[] {
-  return [...rows]
-    .sort(
-      (a, b) =>
-        b.failures - a.failures ||
-        lastTime(b) - lastTime(a) ||
-        a.signature.localeCompare(b.signature),
-    )
-    .map((g): AttentionCard => {
-      const days =
-        g.first_at === null || g.last_at === null ? 1 : utcDay(g.last_at) - utcDay(g.first_at) + 1;
-      const queue = queueOf(g.workflow_name, g.step_id);
-      const label = workflowLabel(g.workflow_name);
-      const run = { href: lapHref(factory, g.latest_run_id), external: false };
-      return {
-        key: `fix:${g.signature}`,
-        kind: ATTENTION_SOURCES.failures.kind,
-        queue,
-        dot: 'failed',
-        title: g.step_id === null ? `${label} failed` : `${label} failed at ${g.step_id}`,
-        age:
-          g.failures > 1
-            ? { text: `${g.failures} runs · ${days} ${days === 1 ? 'day' : 'days'}` }
-            : { since: g.last_at },
-        meta: [
-          { mono: g.workflow_name },
-          ...(g.step_id === null ? [] : [{ text: `step ${g.step_id}` }]),
-          { pill: g.class ?? 'unclassified', state: STOP_CLASS_STATE[g.class ?? 'unclassified'] },
-        ],
-        note: {
-          lead:
-            g.failures === 1
-              ? '1 failed run has this cause.'
-              : `${g.failures} failed runs share this cause.`,
-          rest: g.class === null ? 'It is not classified.' : CLASS_NOTE[g.class],
-          ...(g.line === null ? {} : { code: g.line }),
-        },
-        tiles: [],
-        ask: askAbout(g.latest_run_id, null),
-        actions: [
-          {
-            type: 'link',
-            variant: 'secondary',
-            label: `Open run ${shortRunId(g.latest_run_id)}`,
-            ...run,
-            hooks: {},
-          },
-        ],
-        daily: g.daily,
-        hooks: {
-          'data-attention-item': g.signature,
-          'data-attention-kind': ATTENTION_SOURCES.failures.kind,
-          'data-attention-queue': queue,
-          'data-latest-run': g.latest_run_id,
-          'data-failures': String(g.failures),
-        },
-      };
-    });
-}
-
 /**
- * The four live queries the page and the nav badge both read: one table, so the cards, the count
+ * The live queries the page and the nav badge both read: one table, so the cards, the count
  * and the live phase cannot disagree about which sources make "what needs you".
  */
 export const ATTENTION_SOURCES = {
   decide: { query: 'decide', kind: 'decide', what: 'what is waiting on you' },
   owner: { query: 'owner-queue', kind: 'decide', what: 'the owner queue' },
   unstick: { query: 'unstick', kind: 'unstick', what: 'what stopped moving' },
-  failures: { query: 'failure-groups', kind: 'fix', what: 'failures' },
 } as const;
-
-/** The arguments a source's query takes after the factory: only failure-groups takes one, its cutoff. */
-export function sourceArgs(key: keyof typeof ATTENTION_SOURCES, now: Date): string[] | undefined {
-  return key === 'failures' ? [failuresSince(now)] : undefined;
-}
 
 /** The nav badge's panel of one of those queries, named apart from the page's own panel of it. */
 export const badgePanelName = (query: string): string => `attention-count:${query}`;
 
 /** The query for the head's sweep clause; it is not an item source, so the count never reads it. */
 export const SWEEP_QUERY = 'manager-sweep';
-
-/** The muted line's query; it is not an item source, so the count never reads it. */
-export const RETRIED_QUERY = 'retried-runs';
-
-export function retriedLine(n: number): string {
-  return `${n === 1 ? '1 run hit' : `${n} runs hit`} a passing database or GitHub error today and ${n === 1 ? 'was' : 'were'} retried.`;
-}
 
 /** The one row of manager-sweep.sql: when the manager's last finished run completed; null when it has none. */
 export interface SweepRow {
@@ -570,12 +693,22 @@ export interface SweepRow {
 
 const RECOMMENDATION = 'put its recommendation first on each.';
 
-/** The head's line under the title. The sweep clause is left out when the factory has no finished manager run. */
-export function sweepLine(factory: string, sweptAt: Date | null, now: number): string {
+/**
+ * The head's line under the title. The sweep clause is left out when the factory has no finished
+ * manager run; the recommendation clause only when cards are drawn, since "each" needs items.
+ */
+export function sweepLine(
+  factory: string,
+  sweptAt: Date | null,
+  now: number,
+  cardsDrawn: number,
+): string {
   const seconds = since(sweptAt, now);
-  return seconds === null
-    ? `${factory}. The manager ${RECOMMENDATION}`
-    : `${factory}. The manager swept ${waited(seconds)} ago and ${RECOMMENDATION}`;
+  const items = cardsDrawn > 0;
+  if (seconds === null) return items ? `${factory}. The manager ${RECOMMENDATION}` : `${factory}.`;
+  return items
+    ? `${factory}. The manager swept ${waited(seconds)} ago and ${RECOMMENDATION}`
+    : `${factory}. The manager swept ${waited(seconds)} ago.`;
 }
 
 /**
@@ -592,12 +725,14 @@ export function attentionCount(
 
 /** The groups in README order; an empty group is not drawn. */
 export const byKind = (cards: readonly AttentionCard[]) =>
-  KINDS.map((k) => ({ ...k, cards: cards.filter((c) => c.kind === k.kind) })).filter(
-    (g) => g.cards.length > 0,
-  );
+  KINDS.map((k) => ({
+    ...k,
+    cards: cards.filter((c) => c.kind === k.kind),
+  })).filter((g) => g.cards.length > 0);
 
 /** The same cards under their queues; an empty queue is not drawn. */
 export const byQueue = (cards: readonly AttentionCard[]) =>
-  QUEUES.map((q) => ({ ...q, cards: cards.filter((c) => c.queue === q.queue) })).filter(
-    (g) => g.cards.length > 0,
-  );
+  QUEUES.map((q) => ({
+    ...q,
+    cards: cards.filter((c) => c.queue === q.queue),
+  })).filter((g) => g.cards.length > 0);

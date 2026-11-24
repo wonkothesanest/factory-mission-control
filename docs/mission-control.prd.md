@@ -285,9 +285,10 @@ Three decisions of 2026-11-08:
    about the factory and proposes actions. An agent runs it on the server, over the same data the
    dashboard reads; it has read-only access to the data. Its credentials stay on the server
    (invariant 7). Health, history and "did a change help" are asked here.
-3. **The dashboard may act, in two ways only.** It may **answer** a paused run's question and
-   **resume** a failed or paused run. Both run through that factory's own Archon CLI, after a
-   5-second Undo, and both are recorded. Everything else stays a link or a copied command.
+3. **The dashboard may act, in the five ways of invariant 2** (two on 2026-11-08, three more on 2026-11-12): it may
+   **answer** a paused run's question, **resume** a failed or paused run, and **re-triage**, **close** or
+   **comment on** a work item. All run through that factory's own operator command, after a 5-second Undo,
+   and all are recorded. Everything else stays a link.
 
 **Owner decisions 2026-11-12.** Attention counts only what needs the owner (Decide, Unstick, Clean
 up); failures move to a Failures view on Runs and never count toward "N things need you". A failure
@@ -307,6 +308,12 @@ side reads "Too few to compare" (4.2's threshold). The numbers are Archon's reco
 rules (a re-run replaces earlier records), projected into `mc.metric_records` and not derived from laps.
 The Manager answers "how is the factory doing" from the same query. This adds one panel to 4.9's
 "whether a change helped is a question for the agent", which still holds for everything else.
+
+**Owner decision 2026-11-13 (Board).** The Board follows every work item through seven stages, Intake, Planned,
+Build, Review, App check, Merge and Merged, placed by Archon's own item state (`work/<n>`, projected into
+`mc.work_item_states`) and the live runs. Each card shows its round (Archon's count of build rounds, one dot
+per round in its outcome color), the workflow and step working on it now, how many times the merge queue
+returned it, and when it merged. The board moves live. `docs/design/v3/README.md` "Board" is binding.
 
 The places are:
 - **Attention** (home)

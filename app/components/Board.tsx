@@ -1,47 +1,202 @@
-import type { ReactElement } from 'react';
+import { type ReactElement, type RefObject, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import {
   type BoardColumn,
   type BoardOrder,
   type BoardView,
-  MINI_CARDS,
+  isFinished,
   orderLine,
   orderTarget,
   type PipelineStage,
+  runLineText,
   type WorkItem,
 } from '../lib/board';
+import { localMinute } from '../lib/format';
 import { BOARD_ITEM_STATE, stateColor } from '../lib/states';
 import { Card } from './ui/Card';
-import { Pill } from './ui/StateDot';
+import { Pill, StateDot } from './ui/StateDot';
 
 const TILE =
   'block rounded-[7px] border border-[color:var(--v3-line)] bg-[var(--v3-bg)] px-2.5 py-2 hover:border-[color:var(--v3-line-2)]';
 
-function WorkItemCard({ item }: { item: WorkItem }): ReactElement {
+/** The card opens the work item through its first link, stretched over the card; the run and returned links sit above it. */
+const OPENS = "after:absolute after:inset-0 after:content-['']";
+const INNER_LINK = 'relative z-10 underline hover:text-[color:var(--v3-fg)]';
+const DETAIL = 'font-mono text-[length:var(--v3-t-micro)] text-[color:var(--v3-fg-2)]';
+
+function Rounds({ item }: { item: WorkItem }): ReactElement | null {
+  if (item.round === 0) return null;
   return (
-    <Link to={item.to} data-work-item={item.number} className={TILE}>
-      <span className="font-mono text-[length:var(--v3-t-micro)] text-[color:var(--v3-fg-2)]">
-        #{item.number}
+    <span data-round={item.round} className={`flex flex-wrap items-center gap-1.5 ${DETAIL}`}>
+      round {item.round}
+      {item.dots.map((dot, i) => (
+        <span
+          // biome-ignore lint/suspicious/noArrayIndexKey: a round's place is its identity
+          key={i}
+          data-round-dot={dot.state}
+          title={dot.title}
+          className="relative z-10 inline-block size-2 shrink-0 rounded-full"
+          style={{ background: stateColor(dot.state) }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function RunLine({ item }: { item: WorkItem }): ReactElement | null {
+  const run = item.run;
+  if (run === null) return null;
+  return (
+    <span data-run className={`flex items-start gap-1.5 ${DETAIL}`}>
+      <span className="mt-[3px] shrink-0">
+        <StateDot state="running" small />
       </span>
-      <span className="mt-0.5 block text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg)] [overflow-wrap:anywhere]">
-        {item.title}
-      </span>
-      {item.chips.length > 0 ? (
-        <span className="mt-1.5 flex flex-wrap gap-1">
-          {item.chips.map((chip) => (
-            <Pill
-              compact
-              key={`${chip.kind}-${chip.text}`}
-              data-chip={chip.kind}
-              state={chip.state}
-              live={chip.pulse}
-            >
-              {chip.text}
-            </Pill>
-          ))}
+      <Link to={run.to} title={runLineText(run)} className={`${INNER_LINK} block min-w-0 flex-1`}>
+        <span data-run-workflow className="block truncate text-[color:var(--v3-fg-3)]">
+          {run.workflow}
         </span>
-      ) : null}
-    </Link>
+        {run.step === null ? null : (
+          <span data-run-step className="block truncate text-[color:var(--v3-fg-2)]">
+            {run.step}
+          </span>
+        )}
+      </Link>
+    </span>
+  );
+}
+
+function Returned({ item }: { item: WorkItem }): ReactElement | null {
+  if (item.returned === 0) return null;
+  return (
+    <span data-returned={item.returned} className={`block ${DETAIL}`}>
+      <Link to={item.to} className={INNER_LINK}>
+        returned ×{item.returned}
+      </Link>
+    </span>
+  );
+}
+
+function Merged({ item }: { item: WorkItem }): ReactElement | null {
+  if (item.mergedAt === null) return null;
+  return (
+    <span data-merged-at className={`block ${DETAIL}`}>
+      merged {localMinute(item.mergedAt)}
+    </span>
+  );
+}
+
+/** What a Blocked and parked item waits on: one muted line, a parked reason cut to the line with its full text in the title. */
+function WaitsLine({ item }: { item: WorkItem }): ReactElement | null {
+  const waits = item.waits;
+  if (waits === null) return null;
+  return (
+    <span data-waits={waits.kind} className={`block min-w-0 ${DETAIL}`}>
+      {waits.kind === 'reason' ? (
+        <span title={waits.text} className="block w-0 min-w-full truncate">
+          {waits.text}
+        </span>
+      ) : waits.kind === 'contract' ? (
+        'Needs a contract'
+      ) : (
+        waits.items.map((blocker, i) => (
+          <span key={blocker.number}>
+            {i > 0 ? ', ' : 'Blocked on '}
+            <Link to={blocker.to} className={INNER_LINK}>
+              #{blocker.number}
+            </Link>
+          </span>
+        ))
+      )}
+    </span>
+  );
+}
+
+function StopLine({ item }: { item: WorkItem }): ReactElement | null {
+  if (item.stop === null) return null;
+  return (
+    <span
+      data-stop-line
+      className="block text-[length:var(--v3-t-meta)] [overflow-wrap:anywhere]"
+      style={{ color: stateColor(item.stop.state) }}
+    >
+      {item.stop.text}
+    </span>
+  );
+}
+
+/** Round, the run that holds the item, returns, merge time and stop line: the lines below a card's title, in the design's order. */
+function CardDetail({ item }: { item: WorkItem }): ReactElement {
+  return (
+    <span className="mt-1.5 flex flex-col gap-1">
+      <Rounds item={item} />
+      <RunLine item={item} />
+      <Returned item={item} />
+      <Merged item={item} />
+      <StopLine item={item} />
+      <WaitsLine item={item} />
+    </span>
+  );
+}
+
+/** The Table's rows: the same items, with round, run and step, returned and merged time as columns. */
+function ItemTable({ items }: { items: WorkItem[] }): ReactElement {
+  const head = 'px-2 py-1 text-left font-normal';
+  return (
+    <table className={`w-full border-collapse ${DETAIL}`}>
+      <thead>
+        <tr className="text-[color:var(--v3-fg-3)]">
+          <th className={head}>Item</th>
+          <th className={head}>Round</th>
+          <th className={head}>Run and step</th>
+          <th className={head}>Returned</th>
+          <th className={head}>Merged</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((item) => (
+          <tr key={item.number} className="border-t border-[color:var(--v3-line)] align-top">
+            <td className="px-2 py-1.5">
+              <Link
+                to={item.to}
+                data-work-item={item.number}
+                className="block text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg)]"
+              >
+                #{item.number} <span className="[overflow-wrap:anywhere]">{item.title}</span>
+              </Link>
+              <StopLine item={item} />
+              <WaitsLine item={item} />
+              {item.chips.length > 0 ? (
+                <span className="mt-1 flex flex-wrap gap-1">
+                  {item.chips.map((chip) => (
+                    <Pill
+                      compact
+                      key={`${chip.kind}-${chip.text}`}
+                      data-chip={chip.kind}
+                      state={chip.state}
+                      live={chip.pulse}
+                    >
+                      {chip.text}
+                    </Pill>
+                  ))}
+                </span>
+              ) : null}
+            </td>
+            <td className="px-2 py-1.5">
+              <Rounds item={item} />
+            </td>
+            <td className="px-2 py-1.5">
+              <RunLine item={item} />
+            </td>
+            <td className="px-2 py-1.5">
+              <Returned item={item} />
+            </td>
+            <td className="px-2 py-1.5">
+              <Merged item={item} />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -74,11 +229,7 @@ function Column({ column, older }: { column: BoardColumn; older: ReactElement | 
           {column.empty ?? 'Nothing here'}
         </p>
       ) : (
-        <div className="grid grid-cols-1 gap-2 min-[760px]:grid-cols-2 min-[1100px]:grid-cols-3">
-          {column.items.map((item) => (
-            <WorkItemCard key={item.number} item={item} />
-          ))}
-        </div>
+        <ItemTable items={column.items} />
       )}
       {older}
     </Card>
@@ -90,42 +241,45 @@ const MUTED_LINK =
 
 function MiniCard({ item }: { item: PipelineStage['items'][number] }): ReactElement {
   return (
-    <Link to={item.to} data-work-item={item.number} className={TILE}>
-      <span className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 whitespace-nowrap font-mono text-[length:var(--v3-t-micro)] text-[color:var(--v3-fg-2)]">
-        #{item.number}
-        <span className="flex max-w-full min-w-0 [&>span]:min-w-0" title={item.status}>
-          <Pill compact state={BOARD_ITEM_STATE[item.status]} live={item.status === 'running'}>
-            <span className="min-w-0 truncate">{item.status}</span>
-          </Pill>
+    <div className={`${TILE} relative`}>
+      <Link to={item.to} data-work-item={item.number} className={`block ${OPENS}`}>
+        <span className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 whitespace-nowrap font-mono text-[length:var(--v3-t-micro)] text-[color:var(--v3-fg-2)]">
+          #{item.number}
+          <span
+            className="relative z-10 flex max-w-full min-w-0 [&>span]:min-w-0"
+            title={item.status}
+          >
+            <Pill compact state={BOARD_ITEM_STATE[item.status]} live={item.status === 'running'}>
+              <span className="min-w-0 truncate">{item.status}</span>
+            </Pill>
+          </span>
         </span>
-      </span>
-      <span className="mt-0.5 block text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg)] [overflow-wrap:anywhere]">
-        {item.title}
-      </span>
-    </Link>
+        <span className="mt-0.5 block text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg)] [overflow-wrap:anywhere]">
+          {item.title}
+        </span>
+      </Link>
+      <CardDetail item={item} />
+    </div>
   );
 }
 
 function StageCard({
   stage,
-  moreHref,
   older,
   wide,
 }: {
   stage: PipelineStage;
-  moreHref: string;
   older?: ReactElement | null;
   wide?: boolean;
 }): ReactElement {
-  const shown = stage.items.slice(0, MINI_CARDS);
-  const more = stage.items.length - shown.length;
   return (
     <Card
       role="region"
       data-board-stage={stage.id}
+      tabIndex={-1}
       data-count={stage.items.length}
       aria-label={stage.title}
-      className="flex min-w-0 flex-col gap-2 p-3"
+      className={`flex min-w-0 flex-col gap-2 p-3 ${wide ? '' : 'min-[760px]:max-h-[max(20rem,calc(100vh-var(--board-row-top,8rem)-1.5rem))]'}`}
     >
       <h2 className="text-[13.5px] font-semibold text-[color:var(--v3-fg)]">{stage.title}</h2>
       <p className="text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg-3)]">{stage.subtitle}</p>
@@ -146,17 +300,17 @@ function StageCard({
         </div>
       ) : null}
       <div
-        className={wide ? 'grid grid-cols-1 gap-2 min-[760px]:grid-cols-3' : 'flex flex-col gap-2'}
+        data-stage-items
+        className={`min-h-0 gap-2 ${
+          wide
+            ? 'grid grid-cols-1 min-[760px]:grid-cols-[repeat(auto-fill,minmax(160px,1fr))]'
+            : 'flex flex-col overflow-y-auto min-[760px]:flex-1'
+        }`}
       >
-        {shown.map((item) => (
+        {stage.items.map((item) => (
           <MiniCard key={item.number} item={item} />
         ))}
       </div>
-      {more > 0 ? (
-        <Link to={moreHref} className={MUTED_LINK}>
-          {more} more in Table
-        </Link>
-      ) : null}
       {older}
     </Card>
   );
@@ -164,29 +318,103 @@ function StageCard({
 
 function Pipeline({
   view,
-  moreHref,
   older,
+  row,
 }: {
   view: BoardView;
-  moreHref: string;
   older: ReactElement | null;
+  row: RefObject<HTMLDivElement | null>;
 }): ReactElement {
   const stages = view.pipeline.filter((s) => s.id !== 'blocked');
   const blocked = view.pipeline.find((s) => s.id === 'blocked');
   const { filed, tracked, dropped } = view.found;
+  const [cut, setCut] = useState<{ left: number; right: number | null }>({ left: 0, right: null });
+  useLayoutEffect(() => {
+    const scroller = row.current;
+    const grid = scroller?.firstElementChild;
+    if (!scroller || !grid) return;
+    const update = () => {
+      const edge = scroller.scrollLeft + scroller.clientWidth + 1;
+      const columns = Array.from(grid.children).filter(
+        (column): column is HTMLElement => column instanceof HTMLElement,
+      );
+      const right = columns.findIndex((column) => column.offsetLeft + column.offsetWidth > edge);
+      const left = columns.filter((column) => column.offsetLeft < scroller.scrollLeft - 1).length;
+      setCut((was) =>
+        was.left === left && was.right === (right < 0 ? null : right)
+          ? was
+          : { left, right: right < 0 ? null : right },
+      );
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(scroller);
+    observer.observe(grid);
+    scroller.addEventListener('scroll', update, { passive: true });
+    return () => {
+      observer.disconnect();
+      scroller.removeEventListener('scroll', update);
+    };
+  }, [row]);
+  /** The hint unmounts once its side has nothing hidden, so focus moves to the first revealed column, where the next Tab carries on. */
+  const reveal = (to: 'start' | 'end', column: number) => {
+    const scroller = row.current;
+    const target = scroller?.firstElementChild?.children[column];
+    if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+    scroller?.scrollTo({
+      left: to === 'start' ? 0 : scroller.scrollWidth,
+      behavior: 'smooth',
+    });
+  };
+  const hiddenLeft = stages.slice(0, cut.left);
+  const hiddenRight = cut.right === null ? [] : stages.slice(cut.right);
+  const names = (hidden: PipelineStage[]) =>
+    hidden.map((stage) => `${stage.title} ${stage.items.length}`).join(' · ');
+  const FADE = 'pointer-events-none absolute inset-y-0 w-8 from-[var(--v3-bg)] to-transparent';
+  const HINT =
+    'cursor-pointer text-[length:var(--v3-t-meta)] font-semibold text-[color:var(--v3-fg)] hover:underline';
   return (
     <div className="space-y-2.5">
-      <div className="@container">
-        <div className="grid grid-cols-1 gap-2.5 min-[760px]:@min-[400px]:grid-cols-2 min-[760px]:@min-[640px]:grid-cols-5">
-          {stages.map((stage) => (
-            <StageCard
-              key={stage.id}
-              stage={stage}
-              moreHref={moreHref}
-              older={stage.id === 'merged' ? older : null}
-            />
-          ))}
+      {hiddenLeft.length + hiddenRight.length > 0 ? (
+        <div className="flex justify-between gap-4">
+          {hiddenLeft.length > 0 ? (
+            <button
+              type="button"
+              data-stage-fade="left"
+              className={HINT}
+              onClick={() => reveal('start', 0)}
+            >
+              ← {names(hiddenLeft)}
+            </button>
+          ) : (
+            <span />
+          )}
+          {hiddenRight.length > 0 ? (
+            <button
+              type="button"
+              data-stage-fade="right"
+              className={`${HINT} text-right`}
+              onClick={() => reveal('end', cut.right ?? 0)}
+            >
+              {names(hiddenRight)} →
+            </button>
+          ) : null}
         </div>
+      ) : null}
+      <div className="relative">
+        <div ref={row} data-stage-row className="min-w-0 overflow-x-auto">
+          <div className="grid grid-cols-1 items-start gap-2.5 min-[760px]:grid-cols-none min-[760px]:grid-flow-col min-[760px]:auto-cols-[minmax(150px,1fr)]">
+            {stages.map((stage) => (
+              <StageCard
+                key={stage.id}
+                stage={stage}
+                older={stage.id === 'merged' ? older : null}
+              />
+            ))}
+          </div>
+        </div>
+        {hiddenLeft.length > 0 ? <div className={`${FADE} left-0 bg-gradient-to-r`} /> : null}
+        {hiddenRight.length > 0 ? <div className={`${FADE} right-0 bg-gradient-to-l`} /> : null}
       </div>
       <div className="grid grid-cols-1 gap-2.5 min-[760px]:grid-cols-2">
         <Card
@@ -213,7 +441,7 @@ function Pipeline({
             <Pill compact>dropped {dropped}</Pill>
           </div>
         </Card>
-        {blocked === undefined ? null : <StageCard stage={blocked} moreHref={moreHref} />}
+        {blocked === undefined ? null : <StageCard stage={blocked} wide />}
       </div>
     </div>
   );
@@ -235,18 +463,25 @@ function OrderStrip({
       data-work-order={order.name}
       aria-pressed={selected}
       onClick={onToggle}
-      className={`min-w-0 flex-[1_1_280px] cursor-pointer rounded-[var(--v3-radius-card)] border bg-[var(--v3-panel)] px-3 py-2.5 text-left hover:border-[color:var(--v3-line-2)] ${
-        selected ? 'border-[color:var(--v3-line-2)]' : 'border-[color:var(--v3-line)]'
+      className={`min-w-0 flex-[1_1_280px] cursor-pointer rounded-[var(--v3-radius-card)] border px-3 py-2.5 text-left ${
+        selected
+          ? 'border-[color:var(--v3-fg-3)] bg-[var(--v3-raised)]'
+          : 'border-[color:var(--v3-line)] bg-[var(--v3-panel)] hover:border-[color:var(--v3-line-2)]'
       }`}
     >
       <span className="block text-[length:var(--v3-t-body)] font-semibold text-[color:var(--v3-fg)] [overflow-wrap:anywhere]">
         {order.name}
       </span>
-      <span className="block font-mono text-[length:var(--v3-t-micro)] text-[color:var(--v3-fg-3)]">
+      <span
+        data-order-target
+        className={`block font-mono text-[length:var(--v3-t-micro)] ${selected ? 'text-[color:var(--v3-fg-2)]' : 'text-[color:var(--v3-fg-3)]'}`}
+      >
         {orderTarget(order)}
       </span>
-      <span className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-[var(--v3-raised)]">
-        <span style={{ width: share(order.merged), background: stateColor('done') }} />
+      <span
+        className={`mt-2 flex h-1.5 overflow-hidden rounded-full ${selected ? 'bg-[var(--v3-bg)]' : 'bg-[var(--v3-raised)]'}`}
+      >
+        <span style={{ width: share(order.done), background: stateColor('done') }} />
         <span style={{ width: share(order.building), background: stateColor('running') }} />
         <span style={{ width: share(order.needsYou), background: stateColor('needs-you') }} />
       </span>
@@ -260,21 +495,85 @@ function OrderStrip({
   );
 }
 
+const FINISHED_KEY = 'mc.board.finished-open';
+
+/** Reading `localStorage` itself throws where the browser blocks storage. */
+function readFinishedOpen(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(FINISHED_KEY) === 'open';
+  } catch {
+    return false;
+  }
+}
+
+function writeFinishedOpen(open: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(FINISHED_KEY, open ? 'open' : 'closed');
+  } catch {
+    // The choice then lasts only until the next load.
+  }
+}
+
+/** Orders with work left get a card; finished ones fold into one muted row that expands in place. */
+function WorkOrders({
+  orders,
+  selected,
+  onOrder,
+}: {
+  orders: BoardOrder[];
+  selected: string | null;
+  onOrder: (name: string | null) => void;
+}): ReactElement | null {
+  const [open, setOpen] = useState(readFinishedOpen);
+  const finished = orders.filter(isFinished);
+  // A filtered finished order stays visible while the row is folded, so the filter can be seen and cleared.
+  const above = orders.filter((o) => !isFinished(o) || (!open && o.name === selected));
+  const below = open ? finished : [];
+  if (orders.length === 0) return null;
+  const card = (o: BoardOrder) => (
+    <OrderStrip
+      key={o.name}
+      order={o}
+      selected={selected === o.name}
+      onToggle={() => onOrder(selected === o.name ? null : o.name)}
+    />
+  );
+  return (
+    <div className="space-y-2.5">
+      {above.length > 0 ? <div className="flex flex-wrap gap-2.5">{above.map(card)}</div> : null}
+      {finished.length > 0 ? (
+        <button
+          type="button"
+          data-finished-orders
+          aria-expanded={open}
+          onClick={() => {
+            writeFinishedOpen(!open);
+            setOpen(!open);
+          }}
+          className="block w-full min-w-0 cursor-pointer truncate text-left text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg-3)] hover:text-[color:var(--v3-fg-2)]"
+        >
+          <span aria-hidden="true">{open ? '▾' : '▸'} </span>
+          {finished.length} finished {finished.length === 1 ? 'order' : 'orders'}:{' '}
+          {finished.map((o) => o.name).join(', ')}
+        </button>
+      ) : null}
+      {below.length > 0 ? <div className="flex flex-wrap gap-2.5">{below.map(card)}</div> : null}
+    </div>
+  );
+}
+
 /** The board once every source has answered: the work orders above the Pipeline or the Table. */
 export function BoardBody({
   view,
   mode,
   order,
   onOrder,
-  tableHref,
 }: {
   view: BoardView;
   mode: 'pipeline' | 'table';
   /** The work order the address filters to, or null. */
   order: string | null;
   onOrder: (name: string | null) => void;
-  /** The Board's address with the Table picked, where a card's "more" points. */
-  tableHref: string;
 }): ReactElement {
   const older =
     view.older > 0 && view.olderHref !== null ? (
@@ -282,20 +581,27 @@ export function BoardBody({
         {view.older} older
       </a>
     ) : null;
+  const root = useRef<HTMLDivElement>(null);
+  const row = useRef<HTMLDivElement>(null);
+  // Where the stage row starts with every scroll at the top, so a column's cap ends in the window.
+  useLayoutEffect(() => {
+    const board = root.current;
+    if (!board) return;
+    const place = () => {
+      const stages = row.current;
+      if (!stages) return;
+      let top = stages.getBoundingClientRect().top;
+      for (let a = stages.parentElement; a; a = a.parentElement) top += a.scrollTop;
+      board.style.setProperty('--board-row-top', `${Math.round(top)}px`);
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(board);
+    return () => observer.disconnect();
+  }, []);
   return (
-    <div className="min-w-0 space-y-4">
-      {view.orders.length > 0 ? (
-        <div className="flex flex-wrap gap-2.5">
-          {view.orders.map((o) => (
-            <OrderStrip
-              key={o.name}
-              order={o}
-              selected={order === o.name}
-              onToggle={() => onOrder(order === o.name ? null : o.name)}
-            />
-          ))}
-        </div>
-      ) : null}
+    <div ref={root} className="min-w-0 space-y-4">
+      <WorkOrders orders={view.orders} selected={order} onOrder={onOrder} />
       <p
         data-not-in-order={view.notInOrder}
         className="text-[length:var(--v3-t-meta)] text-[color:var(--v3-fg-3)]"
@@ -303,7 +609,7 @@ export function BoardBody({
         {view.notInOrder} not in a work order
       </p>
       {mode === 'pipeline' ? (
-        <Pipeline view={view} moreHref={tableHref} older={older} />
+        <Pipeline view={view} older={older} row={row} />
       ) : (
         <div className="space-y-2.5">
           {view.columns.map((column) => (

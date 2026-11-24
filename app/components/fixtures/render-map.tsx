@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { createMemoryRouter, RouterProvider, useLocation } from 'react-router';
-import { FACTORY_MAP, selectOnArrival } from '../../map/factory-map';
+import { FACTORY_MAP, heroFrameHeight, selectOnArrival, worldSize } from '../../map/factory-map';
 import { FactoryMap } from '../FactoryMap';
 import { useMapPath } from '../useMapPath';
 
@@ -47,11 +47,16 @@ const GEOMETRY = `
   [data-map-world], [data-map-world] > svg { top: 0; left: 0; }
   [data-map-world] > svg, [data-map-group] { pointer-events: none; }
   [data-map-details] { position: absolute; overflow-y: auto; z-index: 10; }
-  [data-map-controls] { position: absolute; right: 12px; bottom: 12px; display: flex; }
-  [data-map-hint] { position: absolute; left: 12px; bottom: 12px; pointer-events: none; }
+  [data-map-stage] { container-type: inline-size; }
+  [data-map-controls] { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 4px; padding: 4px; border: 1px solid; font: 12px monospace; }
+  [data-map-controls] button { padding: 4px 9px; border: 0; font: inherit; }
+  [data-map-hint] { position: absolute; left: 12px; bottom: 12px; display: none; padding: 5px 9px; border: 1px solid; font: 11px monospace; pointer-events: none; }
+  @container (min-width: 760px) { [data-map-hint] { display: block; } }
 `;
 
-let current: { router: ReturnType<typeof createMemoryRouter>; unmount: () => void } | undefined;
+let current:
+  | { router: ReturnType<typeof createMemoryRouter>; container: HTMLElement; unmount: () => void }
+  | undefined;
 
 const q = (selector: string) => document.querySelector<HTMLElement>(selector);
 const stage = () => q('[data-map-stage]');
@@ -115,6 +120,7 @@ export async function mount(url: string, historyState?: unknown, width?: number)
   root.render(<RouterProvider router={router} />);
   current = {
     router,
+    container,
     unmount() {
       root.unmount();
       container.remove();
@@ -122,6 +128,20 @@ export async function mount(url: string, historyState?: unknown, width?: number)
   };
   await until(() => q('[data-map-stage][data-placed]') !== null, 'the map to be placed');
   return state();
+}
+
+/**
+ * Sets the mounted column's width, as the Manager dock does to the real one, and waits until the
+ * map has met it: the frame at the new width and its height, which is when the camera is placed.
+ */
+export async function resize(width: number) {
+  if (!current) throw new Error('no map is mounted');
+  const before = stage()?.clientWidth;
+  current.container.style.width = `${width}px`;
+  await until(() => stage()?.clientWidth !== before, 'the frame to take the new width');
+  const height = heroFrameHeight(worldSize(FACTORY_MAP), stage()?.clientWidth ?? 0);
+  await until(() => stage()?.offsetHeight === height, 'the frame to take its new height');
+  await new Promise((done) => setTimeout(done, 300));
 }
 
 export const waitFor = (view: string) =>

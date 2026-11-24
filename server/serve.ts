@@ -21,7 +21,7 @@ export function sameOrigin(request: Request): boolean {
 }
 
 /**
- * Local-only request gate (factory security review NET-02, 2026-11-13): the dashboard has no
+ * Local-only request gate: the dashboard has no
  * auth, so it answers only requests addressed to a loopback name on its own port (this defeats
  * DNS rebinding, where a hostile page's own hostname resolves to 127.0.0.1), and refuses
  * state-changing requests that a browser marks as coming from another origin (e.g. a cross-site

@@ -1,0 +1,17 @@
+{
+  "factories": [
+    {
+      "name": "my-app",
+      "repository": "my-org/my-app",
+      "codebase": "my-org/my-app",
+      "console": "http://localhost:3090",
+      "code_web": "https://git.example.com/my-org/my-app"
+    },
+    {
+      "name": "mission-control",
+      "repository": "factory-local/mission-control",
+      "codebase": "factory-local/mission-control",
+      "console": "http://localhost:3090"
+    }
+  ]
+}

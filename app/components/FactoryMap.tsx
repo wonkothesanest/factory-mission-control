@@ -31,7 +31,6 @@ import {
   type MapView,
   midpoint,
   neighbours,
-  openCamera,
   openerOf,
   type Point,
   PHONE,
@@ -75,10 +74,12 @@ const DRAG_SLOP = 3;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2.4;
 /**
- * Below `PHONE` the map opens as refs/40-home-phone.png draws it: the line at a readable scale,
+ * In a window under 760px the map opens as refs/40-home-phone.png draws it: the line at a readable scale,
  * centred between Review and App check, the rest a pan away. Fit still fits the whole map.
  */
 const PHONE_SCALE = 0.42;
+/** The ruling's own threshold, not the shell's `PHONE_QUERY` (1024px): windows from 760px up open fitted. */
+const PHONE_WINDOW_QUERY = '(max-width: 759.98px)';
 const PHONE_FRAME = 460;
 
 interface Camera {
@@ -87,39 +88,109 @@ interface Camera {
   k: number;
 }
 
-/** Where the details panel docks in the frame: on the half away from the press that selected a card. */
+/** Where the details panel docks in the frame: left or right from `PHONE` up, top or bottom below it. */
 type Side = 'left' | 'right' | 'top' | 'bottom';
 
-/** The side of the frame, from its width up, away from a point in it. */
-function sideAway(point: Point, frame: { width: number; height: number }): Side {
-  if (frame.width >= PHONE) return point[0] < frame.width / 2 ? 'right' : 'left';
-  return point[1] < frame.height / 2 ? 'bottom' : 'top';
+interface Box {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
 
-/** Where a card's centre is in the frame under `cam`. */
-const cardCentre = (level: MapView, card: Card, cam: Camera): Point => [
-  cam.x + (card.x + cardWidth(level, card) / 2) * cam.k,
-  cam.y + (card.y + level.cardSize.height / 2) * cam.k,
-];
+/** A card's box in the frame under `cam`. */
+const cardBox = (level: MapView, card: Card, cam: Camera): Box => {
+  const left = cam.x + card.x * cam.k;
+  const top = cam.y + card.y * cam.k;
+  return {
+    left,
+    top,
+    right: left + cardWidth(level, card) * cam.k,
+    bottom: top + level.cardSize.height * cam.k,
+  };
+};
 
 const PANEL_INSET = 12;
 /** Clearance under the panel: the hint and controls the fit keeps room for, and the inset. */
 const PANEL_FOOT = FIT_FOOT + 8;
+/** The narrowest side panel, about the width the phone panel renders well at. */
+const DETAILS_MIN_WIDTH = 300;
+/** The shortest top or bottom panel: the header, the tabs and a line of the tab's content, even when the Open button wraps. */
+const DETAILS_MIN_HEIGHT = 240;
+/** How long a click's pan waits, so the second click of a double-click still lands on the card. */
+const DOUBLE_CLICK_MS = 500;
 
-/** The details panel's box in the frame; its top and bottom clear the hint and the controls. */
-function detailsStyle(side: Side): CSSProperties {
+/** A docked panel: its side, and its width (left, right) or height (top, bottom) in pixels. */
+interface Dock {
+  side: Side;
+  extent: number;
+}
+
+/**
+ * Where the selected card's details dock: on the side of the frame with more room beside the card's
+ * box, as wide (or tall) as that room within the panel's bounds. When the room is under the floor,
+ * the camera pans by the shortfall. It never pans so far that the card's top-left corner (its kind
+ * and title) leaves the frame, and the corner wins when both cannot hold.
+ */
+function dockDetails(
+  box: Box,
+  frame: { width: number; height: number },
+): { dock: Dock; pan: Point } {
+  const gap = PANEL_INSET;
+  /** A shortfall under a pixel is none. */
+  const shortBy = (extent: number, room: number) => {
+    const short = extent - room;
+    return short < 1 ? 0 : short;
+  };
+  if (frame.width >= PHONE) {
+    const standard = Math.min(400, frame.width / 2 - 18);
+    if (box.bottom <= PANEL_INSET || box.top >= frame.height - PANEL_FOOT) {
+      const side = (box.left + box.right) / 2 < frame.width / 2 ? 'right' : 'left';
+      return { dock: { side, extent: standard }, pan: [0, 0] };
+    }
+    const roomRight = frame.width - PANEL_INSET - (box.right + gap);
+    const roomLeft = box.left - gap - PANEL_INSET;
+    const side: Side = roomRight >= roomLeft ? 'right' : 'left';
+    const room = side === 'right' ? roomRight : roomLeft;
+    const extent = Math.min(standard, Math.max(DETAILS_MIN_WIDTH, room));
+    const short = shortBy(extent, room);
+    const pan: Point =
+      side === 'right' ? [-Math.min(short, Math.max(0, box.left - PANEL_INSET)), 0] : [short, 0];
+    return { dock: { side, extent }, pan };
+  }
+  const usable = frame.height - PANEL_INSET - PANEL_FOOT;
+  if (box.right <= PANEL_INSET || box.left >= frame.width - PANEL_INSET) {
+    const side = (box.top + box.bottom) / 2 < frame.height / 2 ? 'bottom' : 'top';
+    return { dock: { side, extent: DETAILS_MIN_HEIGHT }, pan: [0, 0] };
+  }
+  const roomBottom = frame.height - PANEL_FOOT - (box.bottom + gap);
+  const roomTop = box.top - gap - PANEL_INSET;
+  const side: Side = roomBottom >= roomTop ? 'bottom' : 'top';
+  const room = side === 'bottom' ? roomBottom : roomTop;
+  const extent = Math.min(usable, Math.max(DETAILS_MIN_HEIGHT, room));
+  const short = shortBy(extent, room);
+  const pan: Point =
+    side === 'bottom' ? [0, -Math.min(short, Math.max(0, box.top - PANEL_INSET))] : [0, short];
+  return { dock: { side, extent }, pan };
+}
+
+/**
+ * The details panel's box in the frame; its top and bottom clear the hint and the controls. The
+ * caps keep it inside a frame that is resized without a re-dock.
+ */
+function detailsStyle({ side, extent }: Dock): CSSProperties {
   if (side === 'left' || side === 'right') {
     return {
       top: PANEL_INSET,
       bottom: PANEL_FOOT,
-      width: 'min(400px, calc(50% - 18px))',
+      width: `min(${extent}px, calc(50% - 18px))`,
       [side]: PANEL_INSET,
     };
   }
   return {
     left: PANEL_INSET,
     right: PANEL_INSET,
-    height: `calc(50% - ${PANEL_INSET + PANEL_FOOT - 6}px)`,
+    height: `min(${extent}px, calc(100% - ${PANEL_INSET + PANEL_FOOT}px))`,
     [side]: side === 'top' ? PANEL_INSET : PANEL_FOOT,
   };
 }
@@ -315,8 +386,8 @@ function MapCard({
   card: Card;
   live: CardLive | undefined;
   state: 'selected' | 'near' | 'dim' | 'plain';
-  /** `press` is where a mouse press selected it, in client pixels; absent for the keyboard. */
-  onSelect: (id: string, press?: Point) => void;
+  /** `pointer`: a mouse or touch press selected it, not the keyboard. */
+  onSelect: (id: string, pointer?: boolean) => void;
   onOpen: (view: string) => void;
   /** Goes up to the card of the parent level that `card.upTo` names. */
   onUp: (target: string) => void;
@@ -350,7 +421,7 @@ function MapCard({
       onClick={(event) => {
         event.stopPropagation();
         if (card.upTo !== undefined) onUp(card.upTo);
-        else onSelect(card.id, event.detail > 0 ? [event.clientX, event.clientY] : undefined);
+        else onSelect(card.id, event.detail > 0);
       }}
       onDoubleClick={() => card.opens !== undefined && onOpen(card.opens)}
       onKeyDown={onKey}
@@ -517,8 +588,8 @@ const CONTROL =
 
 /**
  * The factory map (PRD 4.1): the owner's drawing with live chips on its cards, a camera that pans,
- * zooms around the cursor and fits the stage, and a details panel inside the frame, on the side
- * away from the card clicked. A drag from anywhere, a card included, pans; a press without movement
+ * zooms around the cursor and fits the stage, and a details panel inside the frame, docked clear
+ * of the selected card. A drag from anywhere, a card included, pans; a press without movement
  * selects. A card with `opens` zooms into its view; `path` names the view shown (the address), and
  * the one component draws every level. `flow` off, or `prefers-reduced-motion`, stops the travelling dot and the
  * flowing dashes.
@@ -581,8 +652,19 @@ export function FactoryMap({
   const [selected, setSelected] = useState<string | null>(select ?? null);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
-  /** Set when a press selects; null when a card is selected without one, until the camera is placed. */
-  const [detailsSide, setDetailsSide] = useState<Side | null>(null);
+  /**
+   * Where the selected card's details dock; null until a selection or a placement docks them, and
+   * while a click waits out a double-click.
+   */
+  const [dock, setDock] = useState<Dock | null>(null);
+  /** The timer of a click's deferred pan. */
+  const pendingDock = useRef<number | null>(null);
+  const clearPending = useCallback(() => {
+    if (pendingDock.current === null) return;
+    window.clearTimeout(pendingDock.current);
+    pendingDock.current = null;
+  }, []);
+  useEffect(() => clearPending, [clearPending]);
   /** The world's fade and zoom while a level opens or closes. */
   const [motion, setMotion] = useState({ moving: false, hidden: false });
   /** The card to select, and flash, on the level above once an `upTo` card has gone up. */
@@ -597,6 +679,8 @@ export function FactoryMap({
     onCard: boolean;
     pointerId: number;
   } | null>(null);
+  /** Whether the person has dragged or zoomed this level, so a resize or a Manager toggle leaves the camera alone (#655). A resize across the shell's 1024px layout switch remounts the map, which opens afresh. */
+  const owned = useRef(false);
   /** Set by a drag's release so the click the browser may send after it does not select or open. */
   const suppressClick = useRef(false);
   /** Finishes the level change in flight at once; null when none is. */
@@ -614,23 +698,35 @@ export function FactoryMap({
     () => setMotion((was) => (was.moving ? { ...was, moving: false } : was)),
     [],
   );
+  /** The person moves the map: the opening stops refitting, and a map still hidden before its placement shows. */
+  const own = useCallback(() => {
+    owned.current = true;
+    setPlaced(true);
+  }, []);
+
   /** Hands the camera to the person: a level change in flight finishes now, and no motion is left. */
   const takeCamera = useCallback(() => {
     transition.current?.();
     settle();
   }, [settle]);
 
-  /** Puts the camera where the level opens, and docks the details of a card selected without a press. */
+  /** Puts the camera where the level opens, and docks the selected card's details clear of it. */
   const placeCamera = useCallback(
     (next: Camera, frame: { width: number; height: number }) => {
-      setCamera(next);
-      setPlaced(true);
+      clearPending();
       const { level } = levelRef.current;
       const card = level.cards.find((c) => c.id === selectedRef.current);
-      if (card === undefined) return;
-      setDetailsSide((was) => was ?? sideAway(cardCentre(level, card, next), frame));
+      if (card === undefined) {
+        setCamera(next);
+        setPlaced(true);
+        return;
+      }
+      const { dock, pan } = dockDetails(cardBox(level, card, next), frame);
+      setCamera(pan[0] || pan[1] ? { ...next, x: next.x + pan[0], y: next.y + pan[1] } : next);
+      setDock(dock);
+      setPlaced(true);
     },
-    [setCamera],
+    [setCamera, clearPending],
   );
 
   /** The Fit control: the whole level in the frame as it is now, see `fitCamera`. */
@@ -638,6 +734,7 @@ export function FactoryMap({
     const el = stage.current;
     if (!el) return;
     takeCamera();
+    owned.current = false;
     setCamera(
       fitCamera(map, levelRef.current.level, { width: el.clientWidth, height: el.clientHeight }),
     );
@@ -646,24 +743,25 @@ export function FactoryMap({
 
   /**
    * The frame's height for its width: the map's height at the scale that fits its width, so the
-   * opening camera leaves no empty bands (owner, PR #326 review), and the phone frame below `PHONE`.
+   * opening camera leaves no empty bands (owner, PR #326 review), and the phone frame in the phone layout.
+   * The camera refits with the frame until the person moves the map (#655).
    */
   const [frameHeight, setFrameHeight] = useState(MIN_FRAME);
   const opened = useCallback(() => {
     const el = stage.current;
     if (!el) return;
     const width = el.clientWidth;
-    if (width >= PHONE) {
+    if (!window.matchMedia(PHONE_WINDOW_QUERY).matches) {
       const height = heroFrameHeight(rootWorld, width);
       setFrameHeight(height);
-      if (el.offsetHeight === height) {
+      if (el.offsetHeight === height && !owned.current) {
         const frame = { width, height: el.clientHeight };
-        placeCamera(openCamera(map, levelRef.current.level, frame), frame);
+        placeCamera(fitCamera(map, levelRef.current.level, frame), frame);
       }
       return;
     }
     setFrameHeight(PHONE_FRAME);
-    if (el.offsetHeight !== PHONE_FRAME) return;
+    if (el.offsetHeight !== PHONE_FRAME || owned.current) return;
     const { level, world } = levelRef.current;
     const at = phoneCentre(level, world);
     placeCamera(
@@ -688,11 +786,12 @@ export function FactoryMap({
   const zoomAround = useCallback(
     (factor: number, mx: number, my: number) => {
       takeCamera();
+      own();
       const was = camRef.current;
       const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, was.k * factor));
       setCamera({ k, x: mx - (mx - was.x) * (k / was.k), y: my - (my - was.y) * (k / was.k) });
     },
-    [takeCamera, setCamera],
+    [takeCamera, own, setCamera],
   );
 
   // A wheel listener React would attach passive, and a passive one cannot keep the page still.
@@ -711,6 +810,7 @@ export function FactoryMap({
           (event.deltaMode === 0 && Math.abs(event.deltaY) < 40 && event.deltaY % 1 !== 0));
       if (swipe) {
         takeCamera();
+        own();
         const was = camRef.current;
         setCamera({ ...was, x: was.x - event.deltaX, y: was.y - event.deltaY });
         return;
@@ -723,7 +823,7 @@ export function FactoryMap({
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [zoomAround, takeCamera, setCamera]);
+  }, [zoomAround, takeCamera, own, setCamera]);
 
   // Esc, and Backspace outside a field: deselect first, else go up a level.
   useEffect(() => {
@@ -766,8 +866,9 @@ export function FactoryMap({
       swapped = true;
       selectedRef.current = arriving.current;
       setSelected(arriving.current);
-      setDetailsSide(null);
+      setDock(null);
       levelRef.current = { level: next, world: nextWorld };
+      owned.current = false;
       setShown(going);
     };
     let finish: (() => void) | undefined;
@@ -842,22 +943,39 @@ export function FactoryMap({
     if (box) zoomAround(factor, box.width / 2, box.height / 2);
   };
 
-  const selectCard = (id: string, press?: Point) => {
-    const box = stage.current?.getBoundingClientRect();
-    if (box) {
-      const at: Point = press
-        ? [press[0] - box.left, press[1] - box.top]
-        : cardCentre(
-            levelRef.current.level,
-            levelRef.current.level.cards.find((c) => c.id === id) as Card,
-            camRef.current,
-          );
-      setDetailsSide(sideAway(at, box));
+  const selectCard = (id: string, pointer = false) => {
+    clearPending();
+    const el = stage.current;
+    if (el) {
+      const frame = { width: el.clientWidth, height: el.clientHeight };
+      const level = levelRef.current.level;
+      const card = level.cards.find((c) => c.id === id) as Card;
+      const was = camRef.current;
+      const { dock, pan } = dockDetails(cardBox(level, card, was), frame);
+      const panned = pan[0] !== 0 || pan[1] !== 0;
+      if (panned && pointer) {
+        setDock(null);
+        pendingDock.current = window.setTimeout(() => {
+          pendingDock.current = null;
+          if (selectedRef.current !== id || levelRef.current.level !== level) return;
+          if (camRef.current !== was) {
+            // The person moved the map meanwhile; panning now would undo that.
+            setDock(dockDetails(cardBox(level, card, camRef.current), frame).dock);
+            return;
+          }
+          setCamera({ ...was, x: was.x + pan[0], y: was.y + pan[1] });
+          setDock(dock);
+        }, DOUBLE_CLICK_MS);
+      } else {
+        setDock(dock);
+        if (panned) setCamera({ ...was, x: was.x + pan[0], y: was.y + pan[1] });
+      }
     }
     setSelected(id);
   };
 
   const pan = (dx: number, dy: number) => {
+    own();
     const was = camRef.current;
     setCamera({ ...was, x: was.x + dx, y: was.y + dy });
   };
@@ -940,7 +1058,7 @@ export function FactoryMap({
     height: world.height,
     transform: `translate(${cam.x}px, ${cam.y}px) scale(${cam.k})`,
     transformOrigin: '0 0',
-    opacity: motion.hidden ? 0 : 1,
+    opacity: motion.hidden || !placed ? 0 : 1,
     transition: motion.moving ? WORLD_MOTION : undefined,
   };
 
@@ -1002,7 +1120,7 @@ export function FactoryMap({
           suppressClick.current = false;
           event.stopPropagation();
         }}
-        className="relative mx-3 cursor-grab touch-none overflow-hidden rounded-xl border border-[color:var(--v3-line)] bg-[var(--v3-bg)] active:cursor-grabbing min-[701px]:mx-6"
+        className="@container relative mx-3 cursor-grab touch-none overflow-hidden rounded-xl border border-[color:var(--v3-line)] bg-[var(--v3-bg)] active:cursor-grabbing min-[701px]:mx-6"
         style={{
           height: frameHeight,
           // The one gradient on a surface the owner allows: the map frame's dot grid (#307).
@@ -1112,7 +1230,7 @@ export function FactoryMap({
         </div>
         <div
           data-map-hint
-          className="pointer-events-none absolute bottom-3 left-3 hidden rounded-lg border border-[color:var(--v3-line)] bg-[var(--v3-panel)] px-[9px] py-[5px] font-mono text-[11px] text-[color:var(--v3-fg-2)] min-[701px]:block"
+          className="pointer-events-none absolute bottom-3 left-3 hidden rounded-lg border border-[color:var(--v3-line)] bg-[var(--v3-panel)] px-[9px] py-[5px] font-mono text-[11px] text-[color:var(--v3-fg-2)] @min-[760px]:block"
         >
           drag = move · scroll = zoom · click = details · double-click ⤢ = open · Esc = up
         </div>
@@ -1154,13 +1272,13 @@ export function FactoryMap({
             +
           </button>
         </div>
-        {selectedCard ? (
+        {selectedCard && dock ? (
           <div
             data-map-details
-            data-side={detailsSide ?? 'right'}
+            data-side={dock.side}
             onPointerDown={(event) => event.stopPropagation()}
             className="absolute z-10 cursor-auto touch-pan-y select-text overflow-y-auto overscroll-contain"
-            style={detailsStyle(detailsSide ?? 'right')}
+            style={detailsStyle(dock)}
           >
             <MapDetails
               card={selectedCard}
